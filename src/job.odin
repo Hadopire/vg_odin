@@ -1,4 +1,4 @@
-package vg_odin
+package vg
 
 import "base:intrinsics"
 import "core:mem/virtual"
@@ -45,7 +45,7 @@ job_init :: proc(num_threads: int = 0, num_fibers: int = 128, fiber_stack_size: 
     job_system.allocator = virtual.arena_allocator(&job_system.arena)
 
     init_fiber := new(WorkerFiber, job_system.allocator)
-    init_fiber.fiber = fiber.convert_thread_to_fiber()
+    init_fiber.fiber = fiber.current()
     init_fiber.fiber.data = init_fiber
     job_system.init_fiber = init_fiber
     is_init_thread = true
@@ -102,7 +102,6 @@ job_shutdown :: proc() {
         fiber.destroy(relay)
     }
 
-    fiber.convert_fiber_to_thread(fiber.current())
     virtual.arena_destroy(&job_system.arena)
 }
 

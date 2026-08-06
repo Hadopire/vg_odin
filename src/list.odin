@@ -1,4 +1,4 @@
-package vg_odin
+package vg
 
 import "base:intrinsics"
 
