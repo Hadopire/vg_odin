@@ -47,6 +47,7 @@ job_init :: proc(num_threads: int = 0, num_fibers: int = 128, fiber_stack_size: 
     init_fiber := new(WorkerFiber, job_system.allocator)
     init_fiber.fiber = fiber.current()
     init_fiber.fiber.data = init_fiber
+    init_fiber.pinned = true
     job_system.init_fiber = init_fiber
     is_init_thread = true
 
@@ -72,34 +73,12 @@ job_shutdown :: proc() {
     sync.cond_broadcast(&job_system.queue_cond)
     sync.mutex_unlock(&job_system.queue_mutex)
 
-    // if we are not running on the init thread, it means shutdown() was called from a worker thread
-    // in this case, we need the init thread to take over from here
-    // otherwise, this thread would commit sepuku and that would be sad
-    relay: ^fiber.Fiber
-    if intrinsics.volatile_load(&is_init_thread) == false {
-        shutdown_relay_proc :: proc(f: ^fiber.Fiber) {
-            sync.mutex_lock(&job_system.shutdown_mutex)
-            job_system.shutdown_ready = true
-            sync.mutex_unlock(&job_system.shutdown_mutex)
-            sync.cond_signal(&job_system.shutdown_cond)
-            fiber.switch_to(thread_fiber)
-        }
-
-        job_system.shutdown_fiber = current_work_fiber()
-        relay = fiber.create(shutdown_relay_proc, allocator = job_system.allocator)
-        fiber.switch_to(relay)
-    }
-
     for worker_thread in job_system.threads {
         thread.destroy(worker_thread)
     }
 
     for &work_fiber in job_system.fiber_storage {
         fiber.destroy(work_fiber.fiber)
-    }
-
-    if relay != nil {
-        fiber.destroy(relay)
     }
 
     virtual.arena_destroy(&job_system.arena)
@@ -186,8 +165,10 @@ Job :: struct {
 
 @(private="file")
 WorkerFiber :: struct {
-    next:  ^WorkerFiber,
-    fiber: ^fiber.Fiber,
+    next:   ^WorkerFiber,
+    prev:   ^WorkerFiber,
+    fiber:  ^fiber.Fiber,
+    pinned:  bool,
 }
 
 @(private="file")
@@ -227,11 +208,7 @@ JobSystem :: struct {
     fiber_stack_size: int,
     threads:          []^thread.Thread,
 
-    shutdown_mutex: PaddedMutex,
-    shutdown_cond:  sync.Cond,
-    init_fiber:     ^WorkerFiber, // the fiber who called init()
-    shutdown_fiber: ^WorkerFiber, // the fiber who called shutdown()
-    shutdown_ready: bool,
+    init_fiber: ^WorkerFiber, // the fiber who called init()
 
     fiber_storage:     []WorkerFiber,
     free_fibers:       ^WorkerFiber,
@@ -393,17 +370,24 @@ resolve_handoff :: proc() {
 @(private="file")
 push_ready_fiber :: proc(work_fiber: ^WorkerFiber) {
     sync.mutex_guard(&job_system.queue_mutex)
-    sll_queue_push(&job_system.rdy_fiber_queue.first, &job_system.rdy_fiber_queue.last, work_fiber)
-    sync.cond_signal(&job_system.queue_cond)
+    dll_push_back(&job_system.rdy_fiber_queue.first, &job_system.rdy_fiber_queue.last, work_fiber)
+    if work_fiber.pinned {
+        sync.cond_broadcast(&job_system.queue_cond)
+    } else {
+        sync.cond_signal(&job_system.queue_cond)
+    }
 }
 
 @(private="file")
 try_pop_ready_fiber :: proc() -> ^WorkerFiber {
-    work_fiber := job_system.rdy_fiber_queue.first
-    if work_fiber != nil {
-        sll_queue_pop(&job_system.rdy_fiber_queue.first, &job_system.rdy_fiber_queue.last)
+    for work_fiber := job_system.rdy_fiber_queue.first; work_fiber != nil; work_fiber = work_fiber.next {
+        if work_fiber.pinned && !is_init_thread {
+            continue
+        }
+        dll_remove(&job_system.rdy_fiber_queue.first, &job_system.rdy_fiber_queue.last, work_fiber)
+        return work_fiber
     }
-    return work_fiber
+    return nil
 }
 
 @(private="file")
@@ -458,18 +442,6 @@ worker_fiber_proc :: proc(f: ^fiber.Fiber) {
             work_fiber := job_or_fiber.(^WorkerFiber)
             switch_and_handoff(work_fiber.fiber, .Return_To_Pool, self)
         }
-    }
-
-    // if we are running on the init thread, it means shutdown() was called from a worker thread
-    // in this case, shutdown() would destroy it's own execution thread
-    // therefore, here, we need to switch to the fiber currently running shutdown()
-    if is_init_thread {
-        sync.mutex_lock(&job_system.shutdown_mutex)
-        for !job_system.shutdown_ready {
-            sync.cond_wait(&job_system.shutdown_cond, &job_system.shutdown_mutex)
-        }
-        sync.mutex_unlock(&job_system.shutdown_mutex)
-        fiber.switch_to(job_system.shutdown_fiber.fiber)
     }
 
     fiber.switch_to(thread_fiber)
