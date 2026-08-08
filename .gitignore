@@ -1,0 +1,15 @@
+*.exe
+*.dll
+*.so
+*.dylib
+*.pdb
+*.obj
+*.bin
+*.o
+bin/
+ols.json
+/.*
+
+!third_party/slang/*.exe
+!third_party/slang/*.dll
+!.gitignore
