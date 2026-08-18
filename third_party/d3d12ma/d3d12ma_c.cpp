@@ -19,6 +19,12 @@ HRESULT d3d12ma_create_resource(D3D12MA::Allocator *allocator, D3D12_HEAP_TYPE h
     return allocator->CreateResource(&alloc_desc, resource_desc, initial_state, clear_value, out_allocation, IID_PPV_ARGS(out_resource));
 }
 
+HRESULT d3d12ma_create_resource3(D3D12MA::Allocator *allocator, D3D12_HEAP_TYPE heap_type, const D3D12_RESOURCE_DESC1 *resource_desc, D3D12_BARRIER_LAYOUT initial_layout, const D3D12_CLEAR_VALUE *clear_value, D3D12MA::Allocation **out_allocation, ID3D12Resource **out_resource) {
+    D3D12MA::ALLOCATION_DESC alloc_desc = {};
+    alloc_desc.HeapType = heap_type;
+    return allocator->CreateResource3(&alloc_desc, resource_desc, initial_layout, clear_value, 0, NULL, out_allocation, IID_PPV_ARGS(out_resource));
+}
+
 void d3d12ma_release_allocation(D3D12MA::Allocation *allocation) {
     allocation->Release();
 }
