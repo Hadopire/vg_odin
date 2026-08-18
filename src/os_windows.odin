@@ -1,5 +1,5 @@
 #+build windows
-#+private
+#+private file
 package vg
 
 import "base:runtime"
@@ -171,6 +171,7 @@ fiber_proc :: proc(f: ^fiber.Fiber) {
     }
 }
 
+@(private="package")
 _os_poll_events :: proc() -> OsEventList {
     event_list = {}
     winproc_context = context
@@ -224,6 +225,7 @@ cursor_client_pos :: proc(hwnd: win32.HWND) -> (x, y: int) {
     return int(point.x), int(point.y)
 }
 
+@(private="package")
 main :: proc() {
     win32.SetConsoleOutputCP(.UTF8)
 
