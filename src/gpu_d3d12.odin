@@ -510,7 +510,7 @@ _gpu_set_scissor :: proc(handle: GpuCommandList, x: int, y: int, width: int, hei
 }
 
 @(private="package")
-_gpu_set_constants :: proc(handle: GpuCommandList, values: []u32) {
+_gpu_set_constants :: proc(handle: GpuCommandList, values: []i32) {
     cmd := (^CommandList)(handle)
     cmd.list->SetGraphicsRoot32BitConstants(0, u32(len(values)), raw_data(values), 0)
 }
@@ -827,11 +827,16 @@ _gpu_destroy_texture :: proc(handle: GpuTexture) {
 }
 
 
-@(private="package")
-_gpu_create_buffer_view :: proc(handle: GpuBuffer, desc: GpuBufferViewDesc) -> GpuView {
-    buffer := (^Buffer)(handle)
-    view := descriptor_alloc(&gpu.srv_heap)
+texture_view_heap :: proc(kind: GpuViewKind) -> ^DescriptorHeap {
+    switch kind {
+    case .Srv, .Uav: return &gpu.srv_heap
+    case .Rtv:       return &gpu.rtv_heap
+    case .Dsv:       return &gpu.dsv_heap
+    }
+    return nil
+}
 
+write_buffer_view :: proc(buffer: ^Buffer, desc: GpuBufferViewDesc, index: int) {
     switch desc.kind {
     case .Srv:
         srv_desc := d3d12.SHADER_RESOURCE_VIEW_DESC{
@@ -844,7 +849,7 @@ _gpu_create_buffer_view :: proc(handle: GpuBuffer, desc: GpuBufferViewDesc) -> G
             NumElements         = u32(desc.count),
             StructureByteStride = u32(desc.stride),
         }
-        gpu.device->CreateShaderResourceView(buffer.resource, &srv_desc, descriptor_cpu(&gpu.srv_heap, view.index))
+        gpu.device->CreateShaderResourceView(buffer.resource, &srv_desc, descriptor_cpu(&gpu.srv_heap, index))
 
     case .Uav:
         uav_desc := d3d12.UNORDERED_ACCESS_VIEW_DESC{
@@ -856,18 +861,14 @@ _gpu_create_buffer_view :: proc(handle: GpuBuffer, desc: GpuBufferViewDesc) -> G
             NumElements         = u32(desc.count),
             StructureByteStride = u32(desc.stride),
         }
-        gpu.device->CreateUnorderedAccessView(buffer.resource, nil, &uav_desc, descriptor_cpu(&gpu.srv_heap, view.index))
+        gpu.device->CreateUnorderedAccessView(buffer.resource, nil, &uav_desc, descriptor_cpu(&gpu.srv_heap, index))
 
     case .Rtv, .Dsv:
         assert(false, "gpu_create_buffer_view: buffers cannot have render target or depth stencil views")
     }
-
-    return GpuView(view)
 }
 
-@(private="package")
-_gpu_create_texture_view :: proc(handle: GpuTexture, desc: GpuTextureViewDesc) -> GpuView {
-    texture := (^Texture)(handle)
+write_texture_view :: proc(texture: ^Texture, desc: GpuTextureViewDesc, heap: ^DescriptorHeap, index: int) {
     format := desc.format if desc.format != .None else texture.format
     dxgi_format := format_to_dxgi[format]
     mip_count := max(desc.mip_count, 1)
@@ -875,7 +876,6 @@ _gpu_create_texture_view :: proc(handle: GpuTexture, desc: GpuTextureViewDesc) -
 
     switch desc.kind {
     case .Srv:
-        view := descriptor_alloc(&gpu.srv_heap)
         srv_desc := d3d12.SHADER_RESOURCE_VIEW_DESC{
             Format                  = dxgi_format,
             ViewDimension           = .TEXTURE2D,
@@ -885,41 +885,62 @@ _gpu_create_texture_view :: proc(handle: GpuTexture, desc: GpuTextureViewDesc) -
             MostDetailedMip = u32(desc.first_mip),
             MipLevels       = u32(mip_count),
         }
-        gpu.device->CreateShaderResourceView(texture.resource, &srv_desc, descriptor_cpu(&gpu.srv_heap, view.index))
-        return GpuView(view)
+        gpu.device->CreateShaderResourceView(texture.resource, &srv_desc, descriptor_cpu(heap, index))
 
     case .Uav:
-        view := descriptor_alloc(&gpu.srv_heap)
         uav_desc := d3d12.UNORDERED_ACCESS_VIEW_DESC{
             Format        = dxgi_format,
             ViewDimension = .TEXTURE2D,
         }
         uav_desc.Texture2D = { MipSlice = u32(desc.first_mip) }
-        gpu.device->CreateUnorderedAccessView(texture.resource, nil, &uav_desc, descriptor_cpu(&gpu.srv_heap, view.index))
-        return GpuView(view)
+        gpu.device->CreateUnorderedAccessView(texture.resource, nil, &uav_desc, descriptor_cpu(heap, index))
 
     case .Rtv:
-        view := descriptor_alloc(&gpu.rtv_heap)
         rtv_desc := d3d12.RENDER_TARGET_VIEW_DESC{
             Format        = dxgi_format,
             ViewDimension = .TEXTURE2D,
         }
         rtv_desc.Texture2D = { MipSlice = u32(desc.first_mip) }
-        gpu.device->CreateRenderTargetView(texture.resource, &rtv_desc, descriptor_cpu(&gpu.rtv_heap, view.index))
-        return GpuView(view)
+        gpu.device->CreateRenderTargetView(texture.resource, &rtv_desc, descriptor_cpu(heap, index))
 
     case .Dsv:
-        view := descriptor_alloc(&gpu.dsv_heap)
         dsv_desc := d3d12.DEPTH_STENCIL_VIEW_DESC{
             Format        = dxgi_format,
             ViewDimension = .TEXTURE2D,
         }
         dsv_desc.Texture2D = { MipSlice = u32(desc.first_mip) }
-        gpu.device->CreateDepthStencilView(texture.resource, &dsv_desc, descriptor_cpu(&gpu.dsv_heap, view.index))
-        return GpuView(view)
+        gpu.device->CreateDepthStencilView(texture.resource, &dsv_desc, descriptor_cpu(heap, index))
     }
+}
 
-    return nil
+@(private="package")
+_gpu_create_buffer_view :: proc(handle: GpuBuffer, desc: GpuBufferViewDesc) -> GpuView {
+    descriptor := descriptor_alloc(&gpu.srv_heap)
+    write_buffer_view((^Buffer)(handle), desc, descriptor.index)
+    return GpuView(descriptor)
+}
+
+@(private="package")
+_gpu_create_temp_buffer_view :: proc(handle: GpuBuffer, desc: GpuBufferViewDesc) -> GpuTempView {
+    index := descriptor_alloc_temp(&gpu.srv_heap)
+    write_buffer_view((^Buffer)(handle), desc, index)
+    return GpuTempView{ idx = i32(index) }
+}
+
+@(private="package")
+_gpu_create_texture_view :: proc(handle: GpuTexture, desc: GpuTextureViewDesc) -> GpuView {
+    heap := texture_view_heap(desc.kind)
+    descriptor := descriptor_alloc(heap)
+    write_texture_view((^Texture)(handle), desc, heap, descriptor.index)
+    return GpuView(descriptor)
+}
+
+@(private="package")
+_gpu_create_temp_texture_view :: proc(handle: GpuTexture, desc: GpuTextureViewDesc) -> GpuTempView {
+    assert(desc.kind == .Srv || desc.kind == .Uav, "gpu_create_temp_texture_view: temp views must be Srv or Uav")
+    index := descriptor_alloc_temp(&gpu.srv_heap)
+    write_texture_view((^Texture)(handle), desc, &gpu.srv_heap, index)
+    return GpuTempView{ idx = i32(index) }
 }
 
 @(private="package")
@@ -928,8 +949,8 @@ _gpu_destroy_view :: proc(handle: GpuView) {
 }
 
 @(private="package")
-_gpu_view_index :: proc(handle: GpuView) -> int {
-    return (^Descriptor)(handle).index
+_gpu_view_index :: proc(handle: GpuView) -> i32 {
+    return i32((^Descriptor)(handle).index)
 }
 
 retire_command_lists :: proc() {

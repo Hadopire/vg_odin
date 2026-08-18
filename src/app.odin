@@ -174,7 +174,7 @@ triangle_draw :: proc(triangle: ^Triangle, cmd: GpuCommandList, swapchain: GpuSw
     gpu_set_scissor(cmd, 0, 0, width, height)
 
     gpu_set_pipeline(cmd, triangle.pipeline)
-    constants := [2]u32{ u32(gpu_view_index(triangle.view)), u32(gpu_view_index(triangle.texture_view)) }
+    constants := [2]i32{ gpu_view_index(triangle.view), gpu_view_index(triangle.texture_view) }
     gpu_set_constants(cmd, constants[:])
     gpu_draw(cmd, 3)
 

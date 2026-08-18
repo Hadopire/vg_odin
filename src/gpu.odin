@@ -8,6 +8,10 @@ GpuCommandList    :: distinct rawptr
 GpuPipelineLayout :: distinct rawptr
 GpuPipeline       :: distinct rawptr
 
+GpuTempView :: struct {
+    idx: i32,
+}
+
 GpuQueue :: enum {
     Direct,
     Async_Compute,
@@ -284,7 +288,7 @@ gpu_set_scissor :: proc(cmd: GpuCommandList, x: int, y: int, width: int, height:
     _gpu_set_scissor(cmd, x, y, width, height)
 }
 
-gpu_set_constants :: proc(cmd: GpuCommandList, values: []u32) {
+gpu_set_constants :: proc(cmd: GpuCommandList, values: []i32) {
     _gpu_set_constants(cmd, values)
 }
 
@@ -352,13 +356,27 @@ gpu_create_texture_view :: proc(texture: GpuTexture, desc: GpuTextureViewDesc) -
     return _gpu_create_texture_view(texture, desc)
 }
 
+gpu_create_temp_buffer_view :: proc(buffer: GpuBuffer, desc: GpuBufferViewDesc) -> GpuTempView {
+    return _gpu_create_temp_buffer_view(buffer, desc)
+}
+
+gpu_create_temp_texture_view :: proc(texture: GpuTexture, desc: GpuTextureViewDesc) -> GpuTempView {
+    return _gpu_create_temp_texture_view(texture, desc)
+}
+
 gpu_destroy_view :: proc(view: GpuView) {
     _gpu_destroy_view(view)
 }
 
-gpu_view_index :: proc(view: GpuView) -> int {
+gpu_view_index_default :: proc(view: GpuView) -> i32 {
     return _gpu_view_index(view)
 }
+
+gpu_view_index_temp :: proc(view: GpuTempView) -> i32 {
+    return view.idx
+}
+
+gpu_view_index :: proc{ gpu_view_index_default, gpu_view_index_temp }
 
 gpu_barrier :: proc(cmd: GpuCommandList, textures: []GpuTextureBarrier, buffers: []GpuBufferBarrier) {
     _gpu_barrier(cmd, textures, buffers)
