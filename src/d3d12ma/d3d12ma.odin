@@ -4,7 +4,7 @@ package d3d12ma
 import "vendor:directx/d3d12"
 import "vendor:directx/dxgi"
 
-foreign import lib "../../third_party/d3d12ma/d3d12ma.lib"
+foreign import lib "../../vendor/d3d12ma/d3d12ma.lib"
 
 Allocator  :: struct {}
 Allocation :: struct {}

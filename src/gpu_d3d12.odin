@@ -11,6 +11,9 @@ import "vendor:directx/d3d12"
 import "vendor:directx/dxgi"
 import "d3d12ma"
 
+@(export, link_name="D3D12SDKVersion") D3D12SDKVersion: u32 = 614
+@(export, link_name="D3D12SDKPath") D3D12SDKPath: cstring = ".\\D3D12\\"
+
 BACK_BUFFER_COUNT :: 2
 
 RTV_DSV_HEAP_SIZE :: 1024
@@ -20,8 +23,8 @@ SRV_HEAP_SIZE     :: 1_000_000
 Descriptor :: struct {
     next:        ^Descriptor,
     heap:        ^DescriptorHeap,
-    index:        int,
-    release_id:   int,
+    index:        i32,
+    release_id:   i64,
 }
 
 DescriptorHeap :: struct {
@@ -29,52 +32,60 @@ DescriptorHeap :: struct {
     type:           d3d12.DESCRIPTOR_HEAP_TYPE,
     cpu_start:      d3d12.CPU_DESCRIPTOR_HANDLE,
     gpu_start:      d3d12.GPU_DESCRIPTOR_HANDLE,
-    stride:         int,
+    stride:         i32,
     shader_visible: bool,
 
-    capacity:       int,
-    used:           int,
+    capacity:       i32,
+    used:           i32,
     first_free:     ^Descriptor,
     first_pending:  ^Descriptor,
     last_pending:   ^Descriptor,
 
-    temp_capacity:  int,
-    temp_head:      int,
+    temp_capacity:  i32,
+    temp_head:      i32,
 }
 
 Buffer :: struct {
     next:        ^Buffer,
     resource:    ^d3d12.IResource,
     allocation:  ^d3d12ma.Allocation,
-    size:         int,
+    size:         i64,
     mapped:       rawptr,
-    release_id:   int,
+    release_id:   i64,
 }
 
 Texture :: struct {
     next:        ^Texture,
     resource:    ^d3d12.IResource,
     allocation:  ^d3d12ma.Allocation,
-    width:        int,
-    height:       int,
-    depth:        int,
-    mips:         int,
-    array_size:   int,
+    width:        i32,
+    height:       i32,
+    depth:        i32,
+    mips:         i32,
+    array_size:   i32,
     format:       GpuFormat,
-    release_id:   int,
+    release_id:   i64,
+}
+
+Fence :: struct {
+    next:        ^Fence,
+    fence:       ^d3d12.IFence,
+    event:        win32.HANDLE,
+    release_id:   i64,
 }
 
 PipelineLayout :: struct {
     next:        ^PipelineLayout,
     signature:   ^d3d12.IRootSignature,
-    release_id:   int,
+    release_id:   i64,
 }
 
 Pipeline :: struct {
     next:        ^Pipeline,
     state:       ^d3d12.IPipelineState,
     layout:      ^PipelineLayout,
-    release_id:   int,
+    topology:     GpuTopology,
+    release_id:   i64,
 }
 
 CommandList :: struct {
@@ -82,15 +93,15 @@ CommandList :: struct {
     allocator:   ^d3d12.ICommandAllocator,
     list:        ^d3d12.IGraphicsCommandList7,
     queue:        GpuQueue,
-    id:           int,
-    fence_value:  int,
+    id:           i64,
+    fence_value:  i64,
 }
 
 Queue :: struct {
     queue:            ^d3d12.ICommandQueue,
     fence:            ^d3d12.IFence,
     fence_event:       win32.HANDLE,
-    last_fence_value:  int,
+    last_fence_value:  i64,
     free_lists:       ^CommandList,
 }
 
@@ -98,13 +109,13 @@ Swapchain :: struct {
     next:              ^Swapchain,
     swapchain:         ^dxgi.ISwapChain4,
     flags:              dxgi.SWAP_CHAIN,
-    width:              int,
-    height:             int,
+    width:              i32,
+    height:             i32,
     latency_waitable:   win32.HANDLE,
     back_buffers:       [BACK_BUFFER_COUNT]Texture,
     back_buffer_views:  [BACK_BUFFER_COUNT]^Descriptor,
-    fence_values:       [BACK_BUFFER_COUNT]int,
-    back_buffer_index:  int,
+    fence_values:       [BACK_BUFFER_COUNT]i64,
+    back_buffer_index:  i32,
 }
 
 Gpu :: struct {
@@ -127,6 +138,7 @@ Gpu :: struct {
     free_swapchains:  ^Swapchain,
     free_layouts:     ^PipelineLayout,
     free_pipelines:   ^Pipeline,
+    free_fences:      ^Fence,
 
     first_pending_buffers:   ^Buffer,
     last_pending_buffers:    ^Buffer,
@@ -136,12 +148,14 @@ Gpu :: struct {
     last_pending_layouts:    ^PipelineLayout,
     first_pending_pipelines: ^Pipeline,
     last_pending_pipelines:  ^Pipeline,
+    first_pending_fences:    ^Fence,
+    last_pending_fences:     ^Fence,
 
     first_in_flight:  ^CommandList,
     last_in_flight:   ^CommandList,
 
-    last_command_list_id: int,
-    last_fence_value:     int,
+    last_command_list_id: i64,
+    last_fence_value:     i64,
 }
 
 gpu: Gpu
@@ -227,7 +241,7 @@ _gpu_init :: proc() {
     descriptor_heap_init(&gpu.sampler_heap, .SAMPLER, SAMPLER_HEAP_SIZE, 0, true)
 }
 
-descriptor_heap_init :: proc(heap: ^DescriptorHeap, type: d3d12.DESCRIPTOR_HEAP_TYPE, capacity: int, temp_capacity: int, shader_visible: bool) {
+descriptor_heap_init :: proc(heap: ^DescriptorHeap, type: d3d12.DESCRIPTOR_HEAP_TYPE, capacity: i32, temp_capacity: i32, shader_visible: bool) {
     desc := d3d12.DESCRIPTOR_HEAP_DESC{
         Type           = type,
         NumDescriptors = u32(capacity + temp_capacity),
@@ -238,7 +252,7 @@ descriptor_heap_init :: proc(heap: ^DescriptorHeap, type: d3d12.DESCRIPTOR_HEAP_
     check(gpu.device->CreateDescriptorHeap(&desc, d3d12.IDescriptorHeap_UUID, (^rawptr)(&heap.heap)), "CreateDescriptorHeap")
 
     heap.type = type
-    heap.stride = int(gpu.device->GetDescriptorHandleIncrementSize(type))
+    heap.stride = i32(gpu.device->GetDescriptorHandleIncrementSize(type))
     heap.capacity = capacity
     heap.temp_capacity = temp_capacity
     heap.shader_visible = shader_visible
@@ -269,7 +283,7 @@ descriptor_alloc :: proc(heap: ^DescriptorHeap) -> ^Descriptor {
 }
 
 
-descriptor_alloc_temp :: proc(heap: ^DescriptorHeap) -> int {
+descriptor_alloc_temp :: proc(heap: ^DescriptorHeap) -> i32 {
     index := heap.capacity + heap.temp_head
     heap.temp_head += 1
     if heap.temp_head == heap.temp_capacity {
@@ -283,7 +297,7 @@ descriptor_free :: proc(descriptor: ^Descriptor) {
     sll_queue_push(&descriptor.heap.first_pending, &descriptor.heap.last_pending, descriptor)
 }
 
-descriptor_recycle :: proc(heap: ^DescriptorHeap, completed: int) {
+descriptor_recycle :: proc(heap: ^DescriptorHeap, completed: i64) {
     for heap.first_pending != nil && heap.first_pending.release_id <= completed {
         node := heap.first_pending
         sll_queue_pop(&heap.first_pending, &heap.last_pending)
@@ -293,7 +307,7 @@ descriptor_recycle :: proc(heap: ^DescriptorHeap, completed: int) {
 
 @(private="package")
 _gpu_equip_window :: proc(window: WindowHandle) -> GpuSwapchain {
-    hwnd := win32.HWND(window)
+    hwnd := _os_window_hwnd(window)
 
     swapchain := gpu.free_swapchains
     if swapchain != nil {
@@ -319,7 +333,7 @@ _gpu_equip_window :: proc(window: WindowHandle) -> GpuSwapchain {
         SampleDesc  = { Count = 1 },
         BufferUsage = {.RENDER_TARGET_OUTPUT},
         BufferCount = BACK_BUFFER_COUNT,
-        Scaling     = .NONE,
+        Scaling     = .STRETCH,
         SwapEffect  = .FLIP_DISCARD,
         AlphaMode   = .UNSPECIFIED,
         Flags       = swapchain.flags,
@@ -360,14 +374,13 @@ _gpu_unequip_window :: proc(handle: GpuSwapchain) {
 }
 
 @(private="package")
-_gpu_swapchain_resize :: proc(handle: GpuSwapchain, width: int, height: int) {
+_gpu_swapchain_resize :: proc(handle: GpuSwapchain, width: i32, height: i32) {
     swapchain := (^Swapchain)(handle)
-    if width == 0 || height == 0 || (width == swapchain.width && height == swapchain.height) {
-        swapchain.width, swapchain.height = width, height
+    if width == swapchain.width && height == swapchain.height {
         return
     }
 
-    wait_for_gpu()
+    wait_for_fence(.Direct, gpu.queues[.Direct].last_fence_value)
     release_back_buffers(swapchain)
 
     check(swapchain.swapchain->ResizeBuffers(BACK_BUFFER_COUNT, u32(width), u32(height), .UNKNOWN, swapchain.flags), "ResizeBuffers")
@@ -382,7 +395,7 @@ _gpu_back_buffer :: proc(handle: GpuSwapchain) -> GpuTexture {
 }
 
 @(private="package")
-_gpu_swapchain_size :: proc(handle: GpuSwapchain) -> (width: int, height: int) {
+_gpu_swapchain_size :: proc(handle: GpuSwapchain) -> (width: i32, height: i32) {
     swapchain := (^Swapchain)(handle)
     return swapchain.width, swapchain.height
 }
@@ -485,7 +498,13 @@ _gpu_clear_render_target :: proc(handle: GpuCommandList, view: GpuView, color: [
 }
 
 @(private="package")
-_gpu_set_viewport :: proc(handle: GpuCommandList, x: int, y: int, width: int, height: int) {
+_gpu_clear_depth_stencil :: proc(handle: GpuCommandList, view: GpuView, depth: f32, stencil: i32) {
+    cmd := (^CommandList)(handle)
+    cmd.list->ClearDepthStencilView(descriptor_cpu(&gpu.dsv_heap, (^Descriptor)(view).index), {.DEPTH, .STENCIL}, depth, u8(stencil), 0, nil)
+}
+
+@(private="package")
+_gpu_set_viewport :: proc(handle: GpuCommandList, x: i32, y: i32, width: i32, height: i32) {
     cmd := (^CommandList)(handle)
     viewport := d3d12.VIEWPORT{
         TopLeftX = f32(x),
@@ -498,7 +517,7 @@ _gpu_set_viewport :: proc(handle: GpuCommandList, x: int, y: int, width: int, he
 }
 
 @(private="package")
-_gpu_set_scissor :: proc(handle: GpuCommandList, x: int, y: int, width: int, height: int) {
+_gpu_set_scissor :: proc(handle: GpuCommandList, x: i32, y: i32, width: i32, height: i32) {
     cmd := (^CommandList)(handle)
     scissor := d3d12.RECT{
         left   = i32(x),
@@ -510,20 +529,37 @@ _gpu_set_scissor :: proc(handle: GpuCommandList, x: int, y: int, width: int, hei
 }
 
 @(private="package")
-_gpu_set_constants :: proc(handle: GpuCommandList, values: []i32) {
+_gpu_push_constant :: proc(handle: GpuCommandList, start_index: i32, values: []i32) {
     cmd := (^CommandList)(handle)
-    cmd.list->SetGraphicsRoot32BitConstants(0, u32(len(values)), raw_data(values), 0)
+    cmd.list->SetGraphicsRoot32BitConstants(0, u32(len(values)), raw_data(values), u32(start_index))
 }
 
 @(private="package")
-_gpu_draw :: proc(handle: GpuCommandList, vertex_count: int, instance_count: int) {
+_gpu_draw :: proc(handle: GpuCommandList, vertex_count: i32, instance_count: i32) {
     cmd := (^CommandList)(handle)
-    cmd.list->IASetPrimitiveTopology(.TRIANGLELIST)
     cmd.list->DrawInstanced(u32(vertex_count), u32(instance_count), 0, 0)
 }
 
 @(private="package")
-_gpu_copy_buffer :: proc(handle: GpuCommandList, dst_handle: GpuBuffer, dst_offset: int, src_handle: GpuBuffer, src_offset: int, size: int) {
+_gpu_set_index_buffer :: proc(handle: GpuCommandList, buffer_handle: GpuBuffer, offset: i32, format: GpuIndexFormat) {
+    cmd := (^CommandList)(handle)
+    buffer := (^Buffer)(buffer_handle)
+    view := d3d12.INDEX_BUFFER_VIEW{
+        BufferLocation = buffer.resource->GetGPUVirtualAddress() + d3d12.GPU_VIRTUAL_ADDRESS(offset),
+        SizeInBytes    = u32(buffer.size - i64(offset)),
+        Format         = index_format_to_dxgi[format],
+    }
+    cmd.list->IASetIndexBuffer(&view)
+}
+
+@(private="package")
+_gpu_draw_indexed :: proc(handle: GpuCommandList, index_count: i32, instance_count: i32, first_index: i32, base_vertex: i32) {
+    cmd := (^CommandList)(handle)
+    cmd.list->DrawIndexedInstanced(u32(index_count), u32(instance_count), u32(first_index), i32(base_vertex), 0)
+}
+
+@(private="package")
+_gpu_copy_buffer :: proc(handle: GpuCommandList, dst_handle: GpuBuffer, dst_offset: i64, src_handle: GpuBuffer, src_offset: i64, size: i64) {
     cmd := (^CommandList)(handle)
     dst := (^Buffer)(dst_handle)
     src := (^Buffer)(src_handle)
@@ -532,7 +568,7 @@ _gpu_copy_buffer :: proc(handle: GpuCommandList, dst_handle: GpuBuffer, dst_offs
     cmd.list->CopyBufferRegion(dst.resource, u64(dst_offset), src.resource, u64(src_offset), u64(size))
 }
 
-texture_footprint :: proc(texture: ^Texture, mip: int, slice: int) -> (footprint: d3d12.PLACED_SUBRESOURCE_FOOTPRINT, rows: int, row_size: int, total: int) {
+texture_footprint :: proc(texture: ^Texture, mip: i32, slice: i32) -> (footprint: d3d12.PLACED_SUBRESOURCE_FOOTPRINT, rows: u64, row_size: u64, total: i64) {
     desc: d3d12.RESOURCE_DESC
     texture.resource->GetDesc(&desc)
 
@@ -540,32 +576,32 @@ texture_footprint :: proc(texture: ^Texture, mip: int, slice: int) -> (footprint
     row_size_bytes: u64
     total_bytes: u64
     gpu.device->GetCopyableFootprints(&desc, u32(mip + slice * texture.mips), 1, 0, &footprint, &num_rows, &row_size_bytes, &total_bytes)
-    return footprint, int(num_rows), int(row_size_bytes), int(total_bytes)
+    return footprint, u64(num_rows), row_size_bytes, i64(total_bytes)
 }
 
 @(private="package")
-_gpu_texture_upload_size :: proc(handle: GpuTexture, mip: int, slice: int) -> int {
+_gpu_texture_upload_size :: proc(handle: GpuTexture, mip: i32, slice: i32) -> i64 {
     texture := (^Texture)(handle)
     _, _, _, total := texture_footprint(texture, mip, slice)
     return total
 }
 
 @(private="package")
-_gpu_set_texture_data :: proc(handle: GpuCommandList, texture_handle: GpuTexture, mip: int, slice: int, data: []byte, staging_handle: GpuBuffer, staging_offset: int) {
+_gpu_set_texture_data :: proc(handle: GpuCommandList, texture_handle: GpuTexture, mip: i32, slice: i32, data: []byte, staging_handle: GpuBuffer, staging_offset: i64) {
     cmd := (^CommandList)(handle)
     texture := (^Texture)(texture_handle)
     staging := (^Buffer)(staging_handle)
 
     footprint, rows, row_size, total := texture_footprint(texture, mip, slice)
-    total_rows := rows * int(footprint.Footprint.Depth)
-    row_pitch := int(footprint.Footprint.RowPitch)
+    total_rows := rows * u64(footprint.Footprint.Depth)
+    row_pitch := u64(footprint.Footprint.RowPitch)
 
     assert(staging_offset + total <= staging.size, "gpu_set_texture_data: upload overruns the staging buffer")
-    assert(len(data) == total_rows * row_size, "gpu_set_texture_data: data size does not match the subresource")
+    assert(len(data) == int(total_rows * row_size), "gpu_set_texture_data: data size does not match the subresource")
 
     mapped := _gpu_map(staging_handle)
     for row in 0 ..< total_rows {
-        copy(mapped[staging_offset + row * row_pitch:], data[row * row_size:][:row_size])
+        copy(mapped[u64(staging_offset) + row * row_pitch:], data[row * row_size:][:row_size])
     }
 
     footprint.Offset = u64(staging_offset)
@@ -662,7 +698,7 @@ _gpu_create_pipeline :: proc(desc: GpuPipelineDesc) -> GpuPipeline {
             DepthWriteMask = desc.depth.write ? .ALL : .ZERO,
             DepthFunc      = compare_to_d3d12[desc.depth.compare],
         },
-        PrimitiveTopologyType = .TRIANGLE,
+        PrimitiveTopologyType = topology_to_type_d3d12[desc.topology],
         NumRenderTargets      = u32(len(desc.color_formats)),
         DSVFormat             = format_to_dxgi[desc.depth_format],
         SampleDesc            = { Count = 1 },
@@ -678,7 +714,7 @@ _gpu_create_pipeline :: proc(desc: GpuPipelineDesc) -> GpuPipeline {
     } else {
         pipeline = new(Pipeline, gpu.arena_allocator)
     }
-    pipeline^ = Pipeline{ layout = layout }
+    pipeline^ = Pipeline{ layout = layout, topology = desc.topology }
 
     check(gpu.device->CreateGraphicsPipelineState(&state_desc, d3d12.IPipelineState_UUID, (^rawptr)(&pipeline.state)), "CreateGraphicsPipelineState")
     return GpuPipeline(pipeline)
@@ -697,6 +733,7 @@ _gpu_set_pipeline :: proc(handle: GpuCommandList, pipeline_handle: GpuPipeline) 
     pipeline := (^Pipeline)(pipeline_handle)
     cmd.list->SetGraphicsRootSignature(pipeline.layout.signature)
     cmd.list->SetPipelineState(pipeline.state)
+    cmd.list->IASetPrimitiveTopology(topology_to_d3d12[pipeline.topology])
 }
 
 @(private="package")
@@ -836,7 +873,7 @@ texture_view_heap :: proc(kind: GpuViewKind) -> ^DescriptorHeap {
     return nil
 }
 
-write_buffer_view :: proc(buffer: ^Buffer, desc: GpuBufferViewDesc, index: int) {
+write_buffer_view :: proc(buffer: ^Buffer, desc: GpuBufferViewDesc, index: i32) {
     switch desc.kind {
     case .Srv:
         srv_desc := d3d12.SHADER_RESOURCE_VIEW_DESC{
@@ -868,7 +905,7 @@ write_buffer_view :: proc(buffer: ^Buffer, desc: GpuBufferViewDesc, index: int) 
     }
 }
 
-write_texture_view :: proc(texture: ^Texture, desc: GpuTextureViewDesc, heap: ^DescriptorHeap, index: int) {
+write_texture_view :: proc(texture: ^Texture, desc: GpuTextureViewDesc, heap: ^DescriptorHeap, index: i32) {
     format := desc.format if desc.format != .None else texture.format
     dxgi_format := format_to_dxgi[format]
     mip_count := max(desc.mip_count, 1)
@@ -924,7 +961,7 @@ _gpu_create_buffer_view :: proc(handle: GpuBuffer, desc: GpuBufferViewDesc) -> G
 _gpu_create_temp_buffer_view :: proc(handle: GpuBuffer, desc: GpuBufferViewDesc) -> GpuTempView {
     index := descriptor_alloc_temp(&gpu.srv_heap)
     write_buffer_view((^Buffer)(handle), desc, index)
-    return GpuTempView{ idx = i32(index) }
+    return GpuTempView{ idx = index }
 }
 
 @(private="package")
@@ -940,7 +977,98 @@ _gpu_create_temp_texture_view :: proc(handle: GpuTexture, desc: GpuTextureViewDe
     assert(desc.kind == .Srv || desc.kind == .Uav, "gpu_create_temp_texture_view: temp views must be Srv or Uav")
     index := descriptor_alloc_temp(&gpu.srv_heap)
     write_texture_view((^Texture)(handle), desc, &gpu.srv_heap, index)
-    return GpuTempView{ idx = i32(index) }
+    return GpuTempView{ idx = index }
+}
+
+@(private="package")
+_gpu_create_fence :: proc() -> GpuFence {
+    fence := gpu.free_fences
+    if fence != nil {
+        sll_stack_pop(&gpu.free_fences)
+    } else {
+        fence = new(Fence, gpu.arena_allocator)
+        fence.event = win32.CreateEventW(nil, false, false, nil)
+    }
+    check(gpu.device->CreateFence(0, {}, d3d12.IFence_UUID, (^rawptr)(&fence.fence)), "CreateFence")
+    return GpuFence(fence)
+}
+
+@(private="package")
+_gpu_destroy_fence :: proc(handle: GpuFence) {
+    fence := (^Fence)(handle)
+    fence.release_id = gpu.last_command_list_id
+    sll_queue_push(&gpu.first_pending_fences, &gpu.last_pending_fences, fence)
+}
+
+@(private="package")
+_gpu_fence_signal :: proc(handle: GpuFence, kind: GpuQueue, value: i64) {
+    fence := (^Fence)(handle)
+    check(gpu.queues[kind].queue->Signal(fence.fence, u64(value)), "fence Signal")
+}
+
+@(private="package")
+_gpu_fence_value :: proc(handle: GpuFence) -> i64 {
+    fence := (^Fence)(handle)
+    return i64(fence.fence->GetCompletedValue())
+}
+
+@(private="package")
+_gpu_fence_wait :: proc(handle: GpuFence, value: i64) {
+    fence := (^Fence)(handle)
+    if i64(fence.fence->GetCompletedValue()) >= value {
+        return
+    }
+    check(fence.fence->SetEventOnCompletion(u64(value), fence.event), "fence SetEventOnCompletion")
+    win32.WaitForSingleObject(fence.event, win32.INFINITE)
+}
+
+@(private="package")
+_gpu_queue_wait :: proc(queue: GpuQueue) {
+    wait_for_fence(queue, gpu.queues[queue].last_fence_value)
+}
+
+@(private="package")
+_gpu_create_sampler :: proc(desc: GpuSamplerDesc) -> GpuSampler {
+    filter: d3d12.FILTER
+    if desc.max_anisotropy > 1 {
+        filter = .ANISOTROPIC
+    } else {
+        bits := 0
+        if desc.min == .Linear {
+            bits |= 0b010000
+        }
+        if desc.mag == .Linear {
+            bits |= 0b000100
+        }
+        if desc.mip == .Linear {
+            bits |= 0b000001
+        }
+        filter = d3d12.FILTER(bits)
+    }
+
+    sampler_desc := d3d12.SAMPLER_DESC{
+        Filter         = filter,
+        AddressU       = address_mode_to_d3d12[desc.address_u],
+        AddressV       = address_mode_to_d3d12[desc.address_v],
+        AddressW       = address_mode_to_d3d12[desc.address_w],
+        MaxAnisotropy  = u32(max(desc.max_anisotropy, 1)),
+        ComparisonFunc = compare_to_d3d12[desc.compare],
+        MaxLOD         = d3d12.FLOAT32_MAX,
+    }
+
+    descriptor := descriptor_alloc(&gpu.sampler_heap)
+    gpu.device->CreateSampler(&sampler_desc, descriptor_cpu(&gpu.sampler_heap, descriptor.index))
+    return GpuSampler(descriptor)
+}
+
+@(private="package")
+_gpu_destroy_sampler :: proc(handle: GpuSampler) {
+    descriptor_free((^Descriptor)(handle))
+}
+
+@(private="package")
+_gpu_sampler_index :: proc(handle: GpuSampler) -> i32 {
+    return ((^Descriptor)(handle)).index
 }
 
 @(private="package")
@@ -950,7 +1078,7 @@ _gpu_destroy_view :: proc(handle: GpuView) {
 
 @(private="package")
 _gpu_view_index :: proc(handle: GpuView) -> i32 {
-    return i32((^Descriptor)(handle).index)
+    return ((^Descriptor)(handle)).index
 }
 
 retire_command_lists :: proc() {
@@ -959,7 +1087,7 @@ retire_command_lists :: proc() {
             return
         }
         queue := &gpu.queues[cmd.queue]
-        if int(queue.fence->GetCompletedValue()) < cmd.fence_value {
+        if i64(queue.fence->GetCompletedValue()) < cmd.fence_value {
             return
         }
         sll_queue_pop(&gpu.first_in_flight, &gpu.last_in_flight)
@@ -967,14 +1095,14 @@ retire_command_lists :: proc() {
     }
 }
 
-completed_command_list_id :: proc() -> int {
+completed_command_list_id :: proc() -> i64 {
     if gpu.first_in_flight != nil {
         return gpu.first_in_flight.id - 1
     }
     return gpu.last_command_list_id
 }
 
-release_pending :: proc(completed: int) {
+release_pending :: proc(completed: i64) {
     for gpu.first_pending_buffers != nil && gpu.first_pending_buffers.release_id <= completed {
         buffer := gpu.first_pending_buffers
         sll_queue_pop(&gpu.first_pending_buffers, &gpu.last_pending_buffers)
@@ -995,6 +1123,13 @@ release_pending :: proc(completed: int) {
         sll_queue_pop(&gpu.first_pending_pipelines, &gpu.last_pending_pipelines)
         pipeline.state->Release()
         sll_stack_push(&gpu.free_pipelines, pipeline)
+    }
+
+    for gpu.first_pending_fences != nil && gpu.first_pending_fences.release_id <= completed {
+        fence := gpu.first_pending_fences
+        sll_queue_pop(&gpu.first_pending_fences, &gpu.last_pending_fences)
+        fence.fence->Release()
+        sll_stack_push(&gpu.free_fences, fence)
     }
 
     for gpu.first_pending_textures != nil && gpu.first_pending_textures.release_id <= completed {
@@ -1144,14 +1279,13 @@ _gpu_barrier :: proc(handle: GpuCommandList, textures: []GpuTextureBarrier, buff
     }
 }
 
-descriptor_cpu :: proc(heap: ^DescriptorHeap, index: int) -> d3d12.CPU_DESCRIPTOR_HANDLE {
+descriptor_cpu :: proc(heap: ^DescriptorHeap, index: i32) -> d3d12.CPU_DESCRIPTOR_HANDLE {
     handle := heap.cpu_start
     handle.ptr += uint(index * heap.stride)
     return handle
 }
 
-
-descriptor_gpu :: proc(heap: ^DescriptorHeap, index: int) -> d3d12.GPU_DESCRIPTOR_HANDLE {
+descriptor_gpu :: proc(heap: ^DescriptorHeap, index: i32) -> d3d12.GPU_DESCRIPTOR_HANDLE {
     assert(heap.shader_visible, "descriptor_gpu: heap is not shader visible")
     handle := heap.gpu_start
     handle.ptr += u64(index * heap.stride)
@@ -1174,6 +1308,10 @@ _gpu_shutdown :: proc() {
         queue.queue->Release()
     }
 
+    for fence := gpu.free_fences; fence != nil; fence = fence.next {
+        win32.CloseHandle(fence.event)
+    }
+
     descriptor_heap_destroy(&gpu.srv_heap)
     descriptor_heap_destroy(&gpu.sampler_heap)
     descriptor_heap_destroy(&gpu.rtv_heap)
@@ -1186,19 +1324,16 @@ _gpu_shutdown :: proc() {
 }
 
 @(private="package")
-_gpu_swapchain_acquire :: proc(handle: GpuSwapchain) -> bool {
+_gpu_swapchain_wait :: proc(handle: GpuSwapchain) {
     chain := (^Swapchain)(handle)
-
-    if chain.width == 0 || chain.height == 0 {
-        return false
-    }
-
     win32.WaitForSingleObject(chain.latency_waitable, win32.INFINITE)
+}
 
-    chain.back_buffer_index = int(chain.swapchain->GetCurrentBackBufferIndex())
+@(private="package")
+_gpu_swapchain_acquire :: proc(handle: GpuSwapchain) {
+    chain := (^Swapchain)(handle)
+    chain.back_buffer_index = i32(chain.swapchain->GetCurrentBackBufferIndex())
     wait_for_fence(.Direct, chain.fence_values[chain.back_buffer_index])
-
-    return true
 }
 
 
@@ -1207,7 +1342,9 @@ _gpu_swapchain_present :: proc(handle: GpuSwapchain) {
     chain := (^Swapchain)(handle)
     queue := &gpu.queues[.Direct]
 
-    check(chain.swapchain->Present(1, {}), "Present")
+    if hr := chain.swapchain->Present(1, {}); hr < 0 {
+        check(hr, "Present")
+    }
 
     gpu.last_fence_value += 1
     queue.last_fence_value = gpu.last_fence_value
@@ -1215,10 +1352,10 @@ _gpu_swapchain_present :: proc(handle: GpuSwapchain) {
     chain.fence_values[chain.back_buffer_index] = gpu.last_fence_value
 }
 
-client_size :: proc(hwnd: win32.HWND) -> (width: int, height: int) {
+client_size :: proc(hwnd: win32.HWND) -> (width: i32, height: i32) {
     rect: win32.RECT
     win32.GetClientRect(hwnd, &rect)
-    return int(rect.right - rect.left), int(rect.bottom - rect.top)
+    return i32(rect.right - rect.left), i32(rect.bottom - rect.top)
 }
 
 create_back_buffer_views :: proc(swapchain: ^Swapchain) {
@@ -1246,7 +1383,7 @@ release_back_buffers :: proc(chain: ^Swapchain) {
     }
 }
 
-wait_for_fence :: proc(kind: GpuQueue, value: int) {
+wait_for_fence :: proc(kind: GpuQueue, value: i64) {
     queue := &gpu.queues[kind]
     if queue.fence->GetCompletedValue() >= u64(value) {
         return
@@ -1279,6 +1416,32 @@ format_to_dxgi := [GpuFormat]dxgi.FORMAT {
     .R32_Float         = .R32_FLOAT,
     .D32_Float         = .D32_FLOAT,
     .D24_Unorm_S8_Uint = .D24_UNORM_S8_UINT,
+}
+
+topology_to_d3d12 := [GpuTopology]d3d12.PRIMITIVE_TOPOLOGY {
+    .Triangle_List  = .TRIANGLELIST,
+    .Triangle_Strip = .TRIANGLESTRIP,
+    .Line_List      = .LINELIST,
+    .Point_List     = .POINTLIST,
+}
+
+topology_to_type_d3d12 := [GpuTopology]d3d12.PRIMITIVE_TOPOLOGY_TYPE {
+    .Triangle_List  = .TRIANGLE,
+    .Triangle_Strip = .TRIANGLE,
+    .Line_List      = .LINE,
+    .Point_List     = .POINT,
+}
+
+index_format_to_dxgi := [GpuIndexFormat]dxgi.FORMAT {
+    .Index16 = .R16_UINT,
+    .Index32 = .R32_UINT,
+}
+
+address_mode_to_d3d12 := [GpuAddressMode]d3d12.TEXTURE_ADDRESS_MODE {
+    .Repeat = .WRAP,
+    .Clamp  = .CLAMP,
+    .Mirror = .MIRROR,
+    .Border = .BORDER,
 }
 
 cull_to_d3d12 := [GpuCullMode]d3d12.CULL_MODE {

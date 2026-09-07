@@ -7,16 +7,26 @@ import win32 "core:sys/windows"
 import "core:mem"
 import "core:unicode/utf8"
 import "fiber"
+import "core:fmt"
 
-event_list:      OsEventList
-winproc_context: runtime.Context
-event_fiber:     ^fiber.Fiber
-from_fiber:      ^fiber.Fiber
-last_absolute_x: int
-last_absolute_y: int
+event_list:        OsEventList
+winproc_context:   runtime.Context
+event_allocator:   mem.Allocator
+event_fiber:       ^fiber.Fiber
+from_fiber:        ^fiber.Fiber
+last_absolute_x:   int
+last_absolute_y:   int
+
+MIN_CLIENT_WIDTH  :: 128
+MIN_CLIENT_HEIGHT :: 96
+
+Win32Window :: struct {
+    hwnd:       win32.HWND,
+    minimized:  bool,
+}
 
 push_event :: proc (kind: OsEventKind, window: WindowHandle) -> ^OsEvent {
-    event := new(OsEvent, context.temp_allocator)
+    event := new(OsEvent, allocator = event_allocator)
     event.kind = kind
     event.window = window
     sll_queue_push(&event_list.first, &event_list.last, event)
@@ -38,31 +48,51 @@ push_key_event :: proc(kind: OsEventKind, window: WindowHandle, key: OsKey) -> ^
     return event
 }
 
+dummy_window: Win32Window
+win32_window_from_hwnd :: proc (hwnd: win32.HWND) -> ^Win32Window {
+    win32_window := (^Win32Window)(uintptr(win32.GetWindowLongPtrW(hwnd, win32.GWLP_USERDATA)))
+    return win32_window != nil ? win32_window : &dummy_window
+}
+
 win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPARAM, lparam: win32.LPARAM) -> win32.LRESULT {
     context = winproc_context
+    window := win32_window_from_hwnd(hwnd)
 
+    result: win32.LRESULT
     switch msg {
+    case win32.WM_CREATE:
+        create := (^win32.CREATESTRUCTW)(uintptr(lparam))
+        win32.SetWindowLongPtrW(hwnd, win32.GWLP_USERDATA, win32.LONG_PTR(uintptr(create.lpCreateParams)))
+        dark: win32.BOOL = true
+        win32.DwmSetWindowAttribute(hwnd, u32(win32.DWMWINDOWATTRIBUTE.DWMWA_USE_IMMERSIVE_DARK_MODE), &dark, size_of(dark))
+        result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
     case win32.WM_DESTROY:
-        push_event(.Window_Close, WindowHandle(hwnd))
+        push_event(.Window_Close, WindowHandle(window))
         win32.PostQuitMessage(0)
-        return 0
+        result = 0
 
     case win32.WM_SIZE:
-        event := push_event(.Window_Resize, WindowHandle(hwnd))
-        event.width = int(win32.LOWORD(int(lparam)))
-        event.height = int(win32.HIWORD(int(lparam)))
-        fiber.switch_to(from_fiber)
-        return 0
+        if wparam == win32.SIZE_MINIMIZED {
+            window.minimized = true
+            push_event(.Window_Minimize, WindowHandle(window))
+        } else if window.minimized{
+            window.minimized = false
+            push_event(.Window_Restore, WindowHandle(window))
+        }
+        result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
-    case win32.WM_MOVE, win32.WM_TIMER:
+    case win32.WM_TIMER:
         fiber.switch_to(from_fiber)
-        return 0
+        result = 0
 
     case win32.WM_INPUTLANGCHANGE:
         update_key_names()
-        return 1
+        result = 1
 
     case win32.WM_INPUT:
+        result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
         raw: win32.RAWINPUT
         size := win32.UINT(size_of(raw))
         win32.GetRawInputData(win32.HRAWINPUT(lparam), win32.RID_INPUT, &raw, &size, size_of(win32.RAWINPUTHEADER))
@@ -71,7 +101,7 @@ win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPAR
             key := win_key_to_os_key(raw.data.keyboard)
             if key != .None {
                 kind: OsEventKind = .Release if int(raw.data.keyboard.Flags) & win32.RI_KEY_BREAK != 0 else .Press
-                push_key_event(kind, WindowHandle(hwnd), key)
+                push_key_event(kind, WindowHandle(window), key)
             }
         }
 
@@ -105,10 +135,10 @@ win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPAR
             }
 
             if moved {
-                event := push_event(.Mouse_Move, WindowHandle(hwnd))
+                event := push_event(.Mouse_Move, WindowHandle(window))
                 event.pos_x, event.pos_y = cursor_client_pos(hwnd)
-                event.delta_x = delta_x
-                event.delta_y = delta_y
+                event.delta_x = i32(delta_x)
+                event.delta_y = i32(delta_y)
             }
 
             TransitionState :: struct {
@@ -132,31 +162,67 @@ win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPAR
 
             for transition in transition_states {
                 if raw.data.mouse.usButtonFlags & transition.flag != 0 {
-                    event := push_key_event(transition.kind, WindowHandle(hwnd), transition.key)
+                    event := push_key_event(transition.kind, WindowHandle(window), transition.key)
                     event.pos_x, event.pos_y = cursor_client_pos(hwnd)
                 }
             }
 
             button_flags := int(mouse.usButtonFlags)
             if button_flags & (win32.RI_MOUSE_WHEEL | win32.RI_MOUSE_HWHEEL) != 0 {
-                event := push_event(.Scroll, WindowHandle(hwnd))
+                event := push_event(.Scroll, WindowHandle(window))
                 event.pos_x, event.pos_y = cursor_client_pos(hwnd)
                 if button_flags & win32.RI_MOUSE_HWHEEL != 0 {
-                    event.delta_x = int(i16(mouse.usButtonData))
+                    event.delta_x = i32(mouse.usButtonData)
                 } else {
-                    event.delta_y = int(i16(mouse.usButtonData))
+                    event.delta_y = i32(mouse.usButtonData)
                 }
             }
         }
 
     case win32.WM_ENTERSIZEMOVE:
-        win32.SetTimer(hwnd, 1, win32.USER_TIMER_MINIMUM, nil)
+        push_event(.Window_Drag_Begin, WindowHandle(window))
+        win32.SetTimer(hwnd, 1, 16, nil)
+        result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     case win32.WM_EXITSIZEMOVE:
+        push_event(.Window_Drag_End, WindowHandle(window))
         win32.KillTimer(hwnd, 1)
+        result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    case win32.WM_GETMINMAXINFO:
+        rect := win32.RECT{ 0, 0, MIN_CLIENT_WIDTH, MIN_CLIENT_HEIGHT }
+        win32.AdjustWindowRect(&rect, win32.WS_OVERLAPPEDWINDOW, false)
+        info := (^win32.MINMAXINFO)(uintptr(lparam))
+        info.ptMinTrackSize = { rect.right - rect.left, rect.bottom - rect.top }
+        result = 0
+
+    case win32.WM_NCCALCSIZE:
+        // fixes the resize artefacts on flip model swapchains
+        // resize the swapchain and present BEFORE returning from WM_NCCALCSIZE
+
+        //frame_x := win32.GetSystemMetrics(win32.SM_CXSIZEFRAME)
+        //frame_y := win32.GetSystemMetrics(win32.SM_CYSIZEFRAME)
+        //title   := win32.GetSystemMetrics(win32.SM_CYCAPTION)
+        //padding := win32.GetSystemMetrics(win32.SM_CXPADDEDBORDER)
+        //window_style := u32(win32.GetWindowLongW(hwnd, win32.GWL_STYLE))
+        //is_fullscreen := (window_style & win32.WS_OVERLAPPEDWINDOW) == 0
+        //if is_fullscreen == false {
+        //    rect := wparam == 0 ? (^win32.RECT)(uintptr(lparam)) : &(^win32.NCCALCSIZE_PARAMS)(uintptr(lparam)).rgrc[0]
+        //    rect.top    += title + padding
+        //    rect.right  -= frame_x + padding
+        //    rect.left   += frame_x + padding
+        //    rect.bottom -= frame_y + padding
+        //}
+
+        result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)
+        fiber.switch_to(from_fiber)
+        win32.DwmFlush()
+
+    case:
+        result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 
-    return win32.DefWindowProcW(hwnd, msg, wparam, lparam)
+    return result
 }
 
 fiber_proc :: proc(f: ^fiber.Fiber) {
@@ -172,9 +238,28 @@ fiber_proc :: proc(f: ^fiber.Fiber) {
 }
 
 @(private="package")
-_os_poll_events :: proc() -> OsEventList {
+_os_mouse_position :: proc(window: WindowHandle) -> (width: i32, height: i32) {
+    return cursor_client_pos((^Win32Window)(window).hwnd)
+}
+
+@(private="package")
+_os_window_size :: proc(window: WindowHandle) -> (width: i32, height: i32) {
+    win32_window := (^Win32Window)(window)
+    rect: win32.RECT
+    win32.GetClientRect(win32_window.hwnd, &rect)
+    return i32(rect.right - rect.left), i32(rect.bottom - rect.top)
+}
+
+@(private="package")
+_os_window_hwnd :: proc(window: WindowHandle) -> win32.HWND {
+    return (^Win32Window)(window).hwnd
+}
+
+@(private="package")
+_os_poll_events :: proc(allocator: mem.Allocator) -> OsEventList {
     event_list = {}
     winproc_context = context
+    event_allocator = allocator
     from_fiber = fiber.current()
     fiber.switch_to(event_fiber)
     return event_list
@@ -218,11 +303,11 @@ win_key_to_os_key :: proc(keyboard: win32.RAWKEYBOARD) -> OsKey {
     return scancode_to_key[code]
 }
 
-cursor_client_pos :: proc(hwnd: win32.HWND) -> (x, y: int) {
+cursor_client_pos :: proc(hwnd: win32.HWND) -> (x, y: i32) {
     point: win32.POINT
     win32.GetCursorPos(&point)
     win32.ScreenToClient(hwnd, &point)
-    return int(point.x), int(point.y)
+    return i32(point.x), i32(point.y)
 }
 
 @(private="package")
@@ -260,6 +345,7 @@ main :: proc() {
     defer fiber.destroy(event_fiber)
     defer fiber.convert_fiber_to_thread(main_fiber)
     winproc_context = context
+    event_allocator = context.temp_allocator
     from_fiber = main_fiber
 
     // window
@@ -276,7 +362,10 @@ main :: proc() {
     }
     win32.RegisterClassExW(&window_class)
 
-    hwnd := win32.CreateWindowExW(0, class_name, win32.L("vg_odin"), win32.WS_OVERLAPPEDWINDOW, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, nil, nil, instance, nil)
+    window := new(Win32Window)
+    defer free(window)
+    window.hwnd = win32.CreateWindowExW(0, class_name, win32.L("vg_odin"), win32.WS_OVERLAPPEDWINDOW, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, nil, nil, instance, window)
+    hwnd := window.hwnd
 
     raw_devices := [2]win32.RAWINPUTDEVICE{
         {
@@ -302,7 +391,7 @@ main :: proc() {
     last_absolute_y = int(point.y)
 
     win32.ShowWindow(hwnd, win32.SW_SHOW)
-    entry(WindowHandle(hwnd))
+    entry(WindowHandle(window))
 }
 
 key_name_storage: [OsKey][4]u8

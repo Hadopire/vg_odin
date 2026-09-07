@@ -10,6 +10,6 @@ bin/
 ols.json
 /.*
 
-!third_party/slang/*.exe
-!third_party/slang/*.dll
+!vendor/slang/*.exe
+!vendor/slang/*.dll
 !.gitignore

@@ -8,7 +8,7 @@ import "core:mem"
 import "core:thread"
 import "fiber"
 
-JobProc :: #type proc(data: rawptr, index: int)
+JobProc :: #type proc(data: rawptr, index: i32)
 
 JobPriority :: enum {
     High,
@@ -125,7 +125,7 @@ job_schedule_batch :: proc(params: []JobParam, counter: ^JobCounter = nil) -> ^J
     job := first
     for param, i in params {
         next := job.next
-        job^ = Job { nil, param.procedure, param.data, i, counter }
+        job^ = Job { nil, param.procedure, param.data, i32(i), counter }
         q := &job_system.job_queues[param.priority]
         sll_queue_push(&q.first, &q.last, job)
         job = next
@@ -159,7 +159,7 @@ Job :: struct {
     next:      ^Job,
     procedure:  JobProc,
     data:       rawptr,
-    index:      int,
+    index:      i32,
     counter:   ^JobCounter,
 }
 
@@ -436,6 +436,7 @@ worker_fiber_proc :: proc(f: ^fiber.Fiber) {
         case ^Job:
             job := job_or_fiber.(^Job)
             job.procedure(job.data, job.index)
+            free_all(context.temp_allocator)
             counter_signal(job.counter)
             release_job(job)
         case ^WorkerFiber:

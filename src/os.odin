@@ -4,7 +4,10 @@ WindowHandle :: distinct rawptr
 
 OsEventKind :: enum {
     Window_Close,
-    Window_Resize,
+    Window_Minimize,
+    Window_Restore,
+    Window_Drag_Begin,
+    Window_Drag_End,
     Press,
     Release,
     Mouse_Move,
@@ -23,14 +26,14 @@ OsEvent :: struct {
     next:      ^OsEvent,
     kind:      OsEventKind,
     window:    WindowHandle,
-    width:     int,
-    height:    int,
+    width:     i32,
+    height:    i32,
     key:       OsKey,
     modifiers: OsModifiers,
-    pos_x:     int,
-    pos_y:     int,
-    delta_x:   int,
-    delta_y:   int,
+    pos_x:     i32,
+    pos_y:     i32,
+    delta_x:   i32,
+    delta_y:   i32,
 }
 
 OsEventList :: struct {
@@ -38,8 +41,16 @@ OsEventList :: struct {
     last:  ^OsEvent,
 }
 
-os_poll_events :: proc() -> OsEventList {
-    return _os_poll_events()
+os_poll_events :: proc(allocator := context.temp_allocator) -> OsEventList {
+    return _os_poll_events(allocator)
+}
+
+os_mouse_position :: proc(window: WindowHandle) -> (x: i32, y: i32) {
+    return _os_mouse_position(window)
+}
+
+os_window_size :: proc(window: WindowHandle) -> (width: i32, height: i32) {
+    return _os_window_size(window)
 }
 
 os_key_name :: proc(key: OsKey) -> string {
