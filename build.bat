@@ -26,9 +26,11 @@ if not exist %OUT_DIR%\D3D12 mkdir %OUT_DIR%\D3D12
 copy /y vendor\d3d12\*.dll %OUT_DIR%\D3D12\ >nul || exit /b 1
 copy /y vendor\d3d12\*.pdb %OUT_DIR%\D3D12\ >nul || exit /b 1
 
-for %%f in (src\shaders\*.slang) do (
-    vendor\slang\slangc.exe %%f -target dxil -profile sm_6_6 -entry vs_main -stage vertex %SLANG_FLAGS% -o %OUT_DIR%\shaders\%%~nf.vs.dxil || exit /b 1
-    vendor\slang\slangc.exe %%f -target dxil -profile sm_6_6 -entry fs_main -stage fragment %SLANG_FLAGS% -o %OUT_DIR%\shaders\%%~nf.fs.dxil || exit /b 1
+set SHADERS=triangle mesh
+
+for %%f in (%SHADERS%) do (
+    vendor\slang\slangc.exe src\shaders\%%f.slang -std 2026 -target dxil -profile sm_6_6 -entry vs_main -stage vertex %SLANG_FLAGS% -o %OUT_DIR%\shaders\%%f.vs.dxil || exit /b 1
+    vendor\slang\slangc.exe src\shaders\%%f.slang -std 2026 -target dxil -profile sm_6_6 -entry fs_main -stage fragment %SLANG_FLAGS% -o %OUT_DIR%\shaders\%%f.fs.dxil || exit /b 1
 )
 
 odin build src -out:%OUT_DIR%\vg_odin.exe %FLAGS%
