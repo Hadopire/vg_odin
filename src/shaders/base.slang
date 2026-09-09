@@ -6,11 +6,6 @@ public struct Ptr<T> {
 
     static const int alignment = (sizeof(T, DefaultDataLayout) % 16 == 0) ? 16 : ((sizeof(T, DefaultDataLayout) % 8 == 0) ? 8 : 4);
 
-    __init(uint heap_idx, uint offset) {
-        this.heap_idx = heap_idx;
-        this.offset = offset;
-    }
-
     T load() {
         ByteAddressBuffer buffer = ResourceDescriptorHeap[heap_idx];
         return buffer.LoadAligned<T>(offset, 16);
