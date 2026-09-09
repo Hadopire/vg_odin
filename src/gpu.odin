@@ -17,6 +17,11 @@ GpuTempView :: struct {
     idx: i32,
 }
 
+GpuPtr :: struct {
+    view_index: i32,
+    offset:     i32,
+}
+
 GpuQueue :: enum {
     Direct,
     Async_Compute,
@@ -146,11 +151,17 @@ GpuTextureDesc :: struct {
     initial_usage: GpuTextureUsage,
 }
 
-GpuBufferViewDesc :: struct {
+GpuSBufferViewDesc :: struct {
     kind:   GpuViewKind,
     first:  i64,
     count:  i64,
     stride: i64,
+}
+
+GpuRawBufferViewDesc :: struct {
+    kind:   GpuViewKind,
+    offset: i64,
+    size:   i64,
 }
 
 GpuTextureViewDesc :: struct {
@@ -260,6 +271,7 @@ GpuTextureBarrier :: struct {
 GpuArenaBlock :: struct {
     next:        ^GpuArenaBlock,
     buffer:      GpuBuffer,
+    view:        GpuView,
     mapped:      []byte,
     size:        i64,
     pos:         i64,
@@ -387,15 +399,20 @@ gpu_push_constant_slice :: proc(cmd: GpuCommandList, start_index: i32, values: [
 }
 
 gpu_push_constant_view :: proc(cmd: GpuCommandList, start_index: i32, view: GpuView) -> i32 {
-    return gpu_push_constant_i64(cmd, start_index, i64(gpu_view_index(view)))
+    return gpu_push_constant_i32(cmd, start_index, gpu_view_index(view))
 }
 
 gpu_push_constant_temp_view :: proc(cmd: GpuCommandList, start_index: i32, view: GpuTempView) -> i32 {
-    return gpu_push_constant_i64(cmd, start_index, i64(gpu_view_index(view)))
+    return gpu_push_constant_i32(cmd, start_index, gpu_view_index(view))
 }
 
 gpu_push_constant_sampler :: proc(cmd: GpuCommandList, start_index: i32, sampler: GpuSampler) -> i32 {
-    return gpu_push_constant_i64(cmd, start_index, i64(gpu_sampler_index(sampler)))
+    return gpu_push_constant_i32(cmd, start_index, gpu_sampler_index(sampler))
+}
+
+gpu_push_constant_ptr :: proc(cmd: GpuCommandList, start_index: i32, ptr: GpuPtr) -> i32 {
+    ptr := ptr
+    return gpu_push_constant_slice(cmd, start_index, (([^]i32)(&ptr))[:2])
 }
 
 gpu_push_constant :: proc{
@@ -405,6 +422,7 @@ gpu_push_constant :: proc{
     gpu_push_constant_view,
     gpu_push_constant_temp_view,
     gpu_push_constant_sampler,
+    gpu_push_constant_ptr,
 }
 
 gpu_draw :: proc(cmd: GpuCommandList, vertex_count: i32, instance_count: i32 = 1) {
@@ -483,12 +501,14 @@ gpu_arena_release :: proc (gpu_arena: ^GpuArena) {
     for gpu_arena.current != nil {
         block := gpu_arena.current
         sll_stack_pop(&gpu_arena.current)
+        gpu_destroy_view(block.view)
         gpu_destroy_buffer(block.buffer)
     }
 
     for gpu_arena.first_pending != nil {
         block := gpu_arena.first_pending
         sll_queue_pop(&gpu_arena.first_pending, &gpu_arena.last_pending)
+        gpu_destroy_view(block.view)
         gpu_destroy_buffer(block.buffer)
     }
 }
@@ -509,6 +529,7 @@ gpu_arena_reset :: proc(gpu_arena: ^GpuArena, retire_value: i64, completed_value
             sll_stack_push(&gpu_arena.current, block)
             gpu_arena.current.pos = 0
         } else {
+            gpu_destroy_view(block.view)
             gpu_destroy_buffer(block.buffer)
             sll_stack_push(&gpu_arena.first_free, block)
         }
@@ -532,17 +553,17 @@ gpu_arena_alloc_block :: proc(gpu_arena: ^GpuArena, size: i64) -> ^GpuArenaBlock
     block^ = {}
     block.size = max(size, gpu_arena.cmt_size)
     block.buffer = gpu_create_buffer({size = block.size, usage = GPU_BUFFER_USAGE_SRV + {.Copy_Source}, memory = .Upload})
+    block.view = gpu_create_raw_buffer_view(block.buffer, {kind = .Srv, offset = 0, size = block.size})
     block.mapped = gpu_map(block.buffer)
 
     return block
 }
 
-gpu_arena_push_bytes :: proc(gpu_arena: ^GpuArena, size: i64, align: i64) -> (data: []byte, buffer: GpuBuffer, offset: i64, index: i64) {
+gpu_arena_push_bytes :: proc(gpu_arena: ^GpuArena, size: i64) -> (data: []byte, ptr: GpuPtr) {
     assert(size != 0)
 
     current := gpu_arena.current
-    align := max(align, 1)
-    bot := i64(mem.align_formula(int(current.pos), int(align)))
+    bot := i64(mem.align_formula(int(current.pos), 16))
     top := bot + size
 
     if top > current.size {
@@ -553,31 +574,39 @@ gpu_arena_push_bytes :: proc(gpu_arena: ^GpuArena, size: i64, align: i64) -> (da
     }
 
     current.pos = top
-    return current.mapped[bot:][:size], current.buffer, bot, bot / align
+    return current.mapped[bot:][:size], {gpu_view_index(current.view), i32(bot)}
 }
 
-gpu_arena_push_typed :: proc(gpu_arena: ^GpuArena, $T: typeid) -> (data: ^T, buffer: GpuBuffer, offset: i64, index: i64) {
-    bytes, block_buffer, block_offset, block_index := gpu_arena_push_bytes(gpu_arena, size_of(T), size_of(T))
-    return (^T)(raw_data(bytes)), block_buffer, block_offset, block_index
+gpu_arena_push_typed :: proc(gpu_arena: ^GpuArena, $T: typeid) -> (data: ^T, ptr: GpuPtr) {
+    bytes, block_ptr := gpu_arena_push_bytes(gpu_arena, size_of(T))
+    return (^T)(raw_data(bytes)), block_ptr
 }
 
-gpu_arena_push_array :: proc(gpu_arena: ^GpuArena, $T: typeid, count: i64) -> (data: []T, buffer: GpuBuffer, offset: i64, index: i64) {
-    bytes, block_buffer, block_offset, block_index := gpu_arena_push_bytes(gpu_arena, size_of(T) * count, size_of(T))
-    return (([^]T)(raw_data(bytes)))[:count], block_buffer, block_offset, block_index
+gpu_arena_push_array :: proc(gpu_arena: ^GpuArena, $T: typeid, count: i64) -> (data: []T, ptr: GpuPtr) {
+    bytes, block_ptr := gpu_arena_push_bytes(gpu_arena, size_of(T) * count)
+    return (([^]T)(raw_data(bytes)))[:count], block_ptr
 }
 
 gpu_arena_push :: proc{ gpu_arena_push_bytes, gpu_arena_push_typed, gpu_arena_push_array }
 
-gpu_create_buffer_view :: proc(buffer: GpuBuffer, desc: GpuBufferViewDesc) -> GpuView {
-    return _gpu_create_buffer_view(buffer, desc)
+gpu_create_sbuffer_view :: proc(buffer: GpuBuffer, desc: GpuSBufferViewDesc) -> GpuView {
+    return _gpu_create_sbuffer_view(buffer, desc)
+}
+
+gpu_create_raw_buffer_view :: proc(buffer: GpuBuffer, desc: GpuRawBufferViewDesc) -> GpuView {
+    return _gpu_create_raw_buffer_view(buffer, desc)
 }
 
 gpu_create_texture_view :: proc(texture: GpuTexture, desc: GpuTextureViewDesc) -> GpuView {
     return _gpu_create_texture_view(texture, desc)
 }
 
-gpu_create_temp_buffer_view :: proc(buffer: GpuBuffer, desc: GpuBufferViewDesc) -> GpuTempView {
-    return _gpu_create_temp_buffer_view(buffer, desc)
+gpu_create_temp_sbuffer_view :: proc(buffer: GpuBuffer, desc: GpuSBufferViewDesc) -> GpuTempView {
+    return _gpu_create_temp_sbuffer_view(buffer, desc)
+}
+
+gpu_create_temp_raw_buffer_view :: proc(buffer: GpuBuffer, desc: GpuRawBufferViewDesc) -> GpuTempView {
+    return _gpu_create_temp_raw_buffer_view(buffer, desc)
 }
 
 gpu_create_temp_texture_view :: proc(texture: GpuTexture, desc: GpuTextureViewDesc) -> GpuTempView {

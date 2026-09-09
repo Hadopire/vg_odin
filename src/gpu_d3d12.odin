@@ -37,9 +37,9 @@ DescriptorHeap :: struct {
 
     capacity:       i32,
     used:           i32,
-    first_free:     ^Descriptor,
-    first_pending:  ^Descriptor,
-    last_pending:   ^Descriptor,
+    first_free:    ^Descriptor,
+    first_pending: ^Descriptor,
+    last_pending:  ^Descriptor,
 
     temp_capacity:  i32,
     temp_head:      i32,
@@ -50,7 +50,6 @@ Buffer :: struct {
     resource:    ^d3d12.IResource,
     allocation:  ^d3d12ma.Allocation,
     size:         i64,
-    mapped:       rawptr,
     release_id:   i64,
 }
 
@@ -787,11 +786,10 @@ _gpu_destroy_buffer :: proc(handle: GpuBuffer) {
 @(private="package")
 _gpu_map :: proc(handle: GpuBuffer) -> []byte {
     buffer := (^Buffer)(handle)
-    if buffer.mapped == nil {
-        read_range := d3d12.RANGE{}
-        check(buffer.resource->Map(0, &read_range, &buffer.mapped), "Map")
-    }
-    return ([^]byte)(buffer.mapped)[:buffer.size]
+    mapped : rawptr
+    read_range := d3d12.RANGE{}
+    check(buffer.resource->Map(0, &read_range, &mapped), "Map")
+    return ([^]byte)(mapped)[:buffer.size]
 }
 
 @(private="package")
@@ -873,7 +871,7 @@ texture_view_heap :: proc(kind: GpuViewKind) -> ^DescriptorHeap {
     return nil
 }
 
-write_buffer_view :: proc(buffer: ^Buffer, desc: GpuBufferViewDesc, index: i32) {
+write_sbuffer_view :: proc(buffer: ^Buffer, desc: GpuSBufferViewDesc, index: i32) {
     switch desc.kind {
     case .Srv:
         srv_desc := d3d12.SHADER_RESOURCE_VIEW_DESC{
@@ -902,6 +900,40 @@ write_buffer_view :: proc(buffer: ^Buffer, desc: GpuBufferViewDesc, index: i32) 
 
     case .Rtv, .Dsv:
         assert(false, "gpu_create_buffer_view: buffers cannot have render target or depth stencil views")
+    }
+}
+
+write_raw_buffer_view :: proc(buffer: ^Buffer, desc: GpuRawBufferViewDesc, index: i32) {
+    switch desc.kind {
+    case .Srv:
+        srv_desc := d3d12.SHADER_RESOURCE_VIEW_DESC{
+            Format                  = .R32_TYPELESS,
+            ViewDimension           = .BUFFER,
+            Shader4ComponentMapping = d3d12.DEFAULT_SHADER_4_COMPONENT_MAPPING,
+        }
+        srv_desc.Buffer = {
+            FirstElement        = u64(desc.offset / 4),
+            NumElements         = u32(desc.size / 4),
+            StructureByteStride = 0,
+            Flags               = {.RAW},
+        }
+        gpu.device->CreateShaderResourceView(buffer.resource, &srv_desc, descriptor_cpu(&gpu.srv_heap, index))
+
+    case .Uav:
+        uav_desc := d3d12.UNORDERED_ACCESS_VIEW_DESC{
+            Format        = .R32_TYPELESS,
+            ViewDimension = .BUFFER,
+        }
+        uav_desc.Buffer = {
+            FirstElement        = u64(desc.offset / 4),
+            NumElements         = u32(desc.size / 4),
+            StructureByteStride = 0,
+            Flags               = {.RAW},
+        }
+        gpu.device->CreateUnorderedAccessView(buffer.resource, nil, &uav_desc, descriptor_cpu(&gpu.srv_heap, index))
+
+    case .Rtv, .Dsv:
+        assert(false, "gpu_create_raw_buffer_view: buffers cannot have render target or depth stencil views")
     }
 }
 
@@ -951,17 +983,17 @@ write_texture_view :: proc(texture: ^Texture, desc: GpuTextureViewDesc, heap: ^D
 }
 
 @(private="package")
-_gpu_create_buffer_view :: proc(handle: GpuBuffer, desc: GpuBufferViewDesc) -> GpuView {
+_gpu_create_sbuffer_view :: proc(handle: GpuBuffer, desc: GpuSBufferViewDesc) -> GpuView {
     descriptor := descriptor_alloc(&gpu.srv_heap)
-    write_buffer_view((^Buffer)(handle), desc, descriptor.index)
+    write_sbuffer_view((^Buffer)(handle), desc, descriptor.index)
     return GpuView(descriptor)
 }
 
 @(private="package")
-_gpu_create_temp_buffer_view :: proc(handle: GpuBuffer, desc: GpuBufferViewDesc) -> GpuTempView {
-    index := descriptor_alloc_temp(&gpu.srv_heap)
-    write_buffer_view((^Buffer)(handle), desc, index)
-    return GpuTempView{ idx = index }
+_gpu_create_raw_buffer_view :: proc(handle: GpuBuffer, desc: GpuRawBufferViewDesc) -> GpuView {
+    descriptor := descriptor_alloc(&gpu.srv_heap)
+    write_raw_buffer_view((^Buffer)(handle), desc, descriptor.index)
+    return GpuView(descriptor)
 }
 
 @(private="package")
@@ -970,6 +1002,20 @@ _gpu_create_texture_view :: proc(handle: GpuTexture, desc: GpuTextureViewDesc) -
     descriptor := descriptor_alloc(heap)
     write_texture_view((^Texture)(handle), desc, heap, descriptor.index)
     return GpuView(descriptor)
+}
+
+@(private="package")
+_gpu_create_temp_sbuffer_view :: proc(handle: GpuBuffer, desc: GpuSBufferViewDesc) -> GpuTempView {
+    index := descriptor_alloc_temp(&gpu.srv_heap)
+    write_sbuffer_view((^Buffer)(handle), desc, index)
+    return GpuTempView{ idx = index }
+}
+
+@(private="package")
+_gpu_create_temp_raw_buffer_view :: proc(handle: GpuBuffer, desc: GpuRawBufferViewDesc) -> GpuTempView {
+    index := descriptor_alloc_temp(&gpu.srv_heap)
+    write_raw_buffer_view((^Buffer)(handle), desc, index)
+    return GpuTempView{ idx = index }
 }
 
 @(private="package")

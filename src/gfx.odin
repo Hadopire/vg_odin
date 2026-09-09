@@ -8,9 +8,8 @@ import "core:path/filepath"
 import "core:time"
 
 GfxVertex :: struct {
-    position: [3]f32,
-    normal:   [3]f32,
-    uv:       [2]f32,
+    pos_u:    [4]f32,
+    normal_v: [4]f32,
 }
 
 GfxCamera :: struct {
@@ -41,7 +40,7 @@ GfxTexture :: struct {
 GFX_CHECKER_SIZE        :: 64
 GFX_DEPTH_FORMAT        :: GpuFormat.D32_Float
 GFX_COLOR_FORMAT        :: GpuFormat.RGBA8_Unorm
-GFX_MESH_CONSTANT_COUNT :: 11
+GFX_MESH_CONSTANT_COUNT :: 8
 
 Gfx :: struct {
     arena:        virtual.Arena,
@@ -95,10 +94,11 @@ gfx_init :: proc() {
     for face, face_index in cube_faces {
         base := face_index * 4
         for corner, corner_index in corners {
+            position := face.normal * 0.5 + face.u * (corner.x * 0.5) + face.v * (corner.y * 0.5)
+            uv := [2]f32{ corner.x * 0.5 + 0.5, corner.y * 0.5 + 0.5 }
             vertices[base + corner_index] = {
-                position = face.normal * 0.5 + face.u * (corner.x * 0.5) + face.v * (corner.y * 0.5),
-                normal   = face.normal,
-                uv       = { corner.x * 0.5 + 0.5, corner.y * 0.5 + 0.5 },
+                pos_u    = { position.x, position.y, position.z, uv.x },
+                normal_v = { face.normal.x, face.normal.y, face.normal.z, uv.y },
             }
         }
         indices[face_index * 6 + 0] = i32(base + 0)
@@ -174,10 +174,10 @@ gfx_init :: proc() {
     gpu_submit(submits[:])
     gpu_destroy_buffer(staging)
 
-    gfx.mesh.vertex_view = gpu_create_buffer_view(gfx.mesh.vertices, {
+    gfx.mesh.vertex_view = gpu_create_raw_buffer_view(gfx.mesh.vertices, {
         kind   = .Srv,
-        count  = len(vertices),
-        stride = size_of(GfxVertex),
+        offset = 0,
+        size   = size_of(vertices),
     })
     gfx.texture.view = gpu_create_texture_view(gfx.texture.data, { kind = .Srv })
 }
@@ -230,25 +230,11 @@ gfx_render :: proc(frame: ^FrameContext) {
         gfx.depth_height = height
     }
 
-    camera, camera_buffer, _, camera_index := gpu_arena_push(gfx.gpu_arena, GfxCamera)
+    camera, camera_ptr := gpu_arena_push(gfx.gpu_arena, GfxCamera)
     camera.view_projection = frame.view_projection
-    camera_view := gpu_create_temp_buffer_view(camera_buffer, {
-        kind   = .Srv,
-        first  = camera_index,
-        count  = 1,
-        stride = size_of(GfxCamera),
-    })
-
-    transform, transform_buffer, _, transform_index := gpu_arena_push(gfx.gpu_arena, GfxTransform)
+    transform, transform_ptr := gpu_arena_push(gfx.gpu_arena, GfxTransform)
     transform.model = frame.cube_transform
     transform.color = frame.cube_color
-
-    transform_view := gpu_create_temp_buffer_view(transform_buffer, {
-        kind   = .Srv,
-        first  = transform_index,
-        count  = 1,
-        stride = size_of(GfxTransform),
-    })
 
     cmd := gpu_command_list_begin(.Direct)
 
@@ -261,16 +247,15 @@ gfx_render :: proc(frame: ^FrameContext) {
     gpu_clear_depth_stencil(cmd, gfx.depth_view)
     gpu_set_viewport(cmd, 0, 0, width, height)
     gpu_set_scissor(cmd, 0, 0, width, height)
-
     gpu_set_pipeline(cmd, gfx.pipeline)
     gpu_set_index_buffer(cmd, gfx.mesh.indices, 0, .Index32)
+
     c_idx : i32 = 0
-    c_idx = gpu_push_constant(cmd, c_idx, gfx.mesh.vertex_view)
-    c_idx = gpu_push_constant(cmd, c_idx, camera_view)
-    c_idx = gpu_push_constant(cmd, c_idx, transform_view)
+    c_idx = gpu_push_constant(cmd, c_idx, GpuPtr{ view_index = gpu_view_index(gfx.mesh.vertex_view) })
+    c_idx = gpu_push_constant(cmd, c_idx, camera_ptr)
+    c_idx = gpu_push_constant(cmd, c_idx, transform_ptr)
     c_idx = gpu_push_constant(cmd, c_idx, gfx.texture.view)
-    c_idx = gpu_push_constant(cmd, c_idx, gfx.sampler)
-    gpu_push_constant(cmd, c_idx, i32(0))
+    gpu_push_constant(cmd, c_idx, gfx.sampler)
     gpu_draw_indexed(cmd, gfx.mesh.index_count)
 
     gpu_barrier(cmd, GpuTextureBarrier{ texture = back_buffer, before = {.Rtv}, after = {.Present} })

@@ -1,12 +1,6 @@
-struct Vertex {
-    float3 position;
-    float3 normal;
-    float2 uv;
-};
+#include "macros.slang"
 
-struct Camera {
-    float4x4 view_projection;
-};
+import base;
 
 struct Transform {
     float4x4 model;
@@ -14,12 +8,10 @@ struct Transform {
 };
 
 struct PushConstants {
-    StructuredBuffer<Vertex>.Handle    vertices;
-    StructuredBuffer<Camera>.Handle    camera;
-    StructuredBuffer<Transform>.Handle transforms;
-    Texture2D<float4>.Handle           albedo;
-    SamplerState.Handle                sampler;
-    uint                               transform_index;
+    PUSH_PTR(Vertex8, vertices)
+    PUSH_PTR(Camera, camera)
+    PUSH_PTR(Transform, transform)
+    PUSH_TEXTURE(albedo)
 };
 
 ConstantBuffer<PushConstants> push;
@@ -32,18 +24,19 @@ struct VsOutput {
 
 [shader("vertex")]
 VsOutput vs_main(uint vertex_id : SV_VertexID) {
-    Vertex vertex = push.vertices[vertex_id];
-    Transform transform = push.transforms[push.transform_index];
-    float4 world = mul(transform.model, float4(vertex.position, 1.0));
+    Vertex8   vertex = push.vertices[vertex_id];
+    Transform transform = push.transform.load();
+    float4    world = mul(transform.model, float4(vertex.position(), 1.0));
+    float4x4  vp = push.camera.load().view_projection;
 
     VsOutput output;
-    output.position = mul(push.camera[0].view_projection, world);
-    output.uv = vertex.uv;
+    output.position = mul(vp, world);
+    output.uv = vertex.uv();
     output.color = transform.color;
     return output;
 }
 
 [shader("fragment")]
 float4 fs_main(VsOutput input) : SV_Target {
-    return push.albedo.Sample(push.sampler, input.uv) * input.color;
+    return push.albedo.sample(input.uv) * input.color;
 }
