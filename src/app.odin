@@ -1,5 +1,6 @@
-package vg
+﻿package vg
 
+import "core:fmt"
 import "core:math"
 import "core:math/linalg"
 import "core:mem"
@@ -17,11 +18,14 @@ FrameContext :: struct {
     view_projection: matrix[4, 4]f32,
     cube_transform:  matrix[4, 4]f32,
     cube_color:      [4]f32,
+    texts:           []GfxFontText,
     os_events:       OsEventList,
+    window:          WindowHandle,
 }
 
 AppContext :: struct {
     render_counter:  ^JobCounter,
+    face:            GfxFontFace,
     cursor:          [2]f32,
     async_rendering: bool,
     done:            bool,
@@ -89,6 +93,36 @@ update :: proc(app: ^AppContext, frame: ^FrameContext) {
     rotation := linalg.matrix4_rotate_f32(frame.time * 0.8, linalg.normalize([3]f32{ 0.4, 1, 0.2 }))
     frame.view_projection = projection * view
     frame.cube_transform = linalg.matrix4_translate_f32(cube_position) * rotation
+
+    texts := make([dynamic]GfxFontText, 0, 32, frame.allocator)
+    line_top : f32 = 16
+    for size_in_point in ([]f32{ 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 18, 20, 24, 28, 32, 36 }) {
+        metrics := gfx_font_metrics(app.face, size_in_point)
+        append(&texts, GfxFontText{
+            face          = app.face,
+            size_in_point = size_in_point,
+            origin        = { gfx_font_atlas_size + 16, line_top + metrics.ascent },
+            color         = { 1, 1, 1, 1 },
+            text          = fmt.aprintf("%vpt Blasts the target with energy, dealing ([148.7% of Spell Power]) Arcane damage.", size_in_point, allocator = frame.allocator),
+        })
+        line_top += metrics.line_height
+    }
+    for line in ([]string{
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz",
+        "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
+        "coucou la djobiteam, COUCOU LA COMPAGNIE SAVA OU KOI KE SE SOIIIILLE",
+    }) {
+        metrics := gfx_font_metrics(app.face, 12)
+        append(&texts, GfxFontText{
+            face          = app.face,
+            size_in_point = 12,
+            origin        = { gfx_font_atlas_size + 16, line_top + metrics.ascent },
+            color         = { 0.8, 0.85, 1, 1 },
+            text          = line,
+        })
+        line_top += metrics.line_height
+    }
+    frame.texts = texts[:]
 }
 
 render_job :: proc(data: rawptr, index: i32) {
@@ -110,6 +144,9 @@ entry :: proc(window: WindowHandle) {
     gfx_init()
     defer gfx_shutdown()
 
+    app: AppContext
+    app.face = gfx_font_open("IbarraRealNova-Regular.ttf")
+
     frame_contexts: [2]FrameContext
     for &frame in frame_contexts {
         if err := virtual.arena_init_growing(&frame.arena); err != nil {
@@ -124,7 +161,6 @@ entry :: proc(window: WindowHandle) {
     last_tick := start_tick
     initial_x, initial_y := os_mouse_position(window)
 
-    app: AppContext
     app.cursor.x, app.cursor.y = f32(initial_x), f32(initial_y)
 
     loop: for frame_index : i64 = 0;; frame_index += 1 {
@@ -143,6 +179,7 @@ entry :: proc(window: WindowHandle) {
         last_tick = now
         window_width, window_height := os_window_size(window)
         frame.resolution.x, frame.resolution.y = f32(max(1, window_width)), f32(max(1, window_height))
+        frame.window = window
 
         update(&app, frame)
         if app.done do break
@@ -156,6 +193,7 @@ entry :: proc(window: WindowHandle) {
             app.render_counter = job_schedule(.High, render_job, frame)
         } else {
             render_job(frame, 0)
+            gpu_queue_wait(.Direct)
         }
 
         free_all(context.temp_allocator)

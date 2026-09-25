@@ -43,6 +43,7 @@ GpuFormat :: enum {
     RGBA16_Float,
     RGBA32_Float,
     R32_Float,
+    R8_Unorm,
     D32_Float,
     D24_Unorm_S8_Uint,
 }
@@ -143,9 +144,9 @@ GpuBufferDesc :: struct {
 GpuTextureDesc :: struct {
     width:         i32,
     height:        i32,
-    depth:         i32,
-    mips:          i32,
-    array_size:    i32,
+    depth:         i32,             // 0 or 1 = Texture2D, >1 = Texture3D
+    mips:          i32,             // 0 = one mip
+    array_size:    i32,             // 0 or 1 = Texture2D, >1 = Texture2DArray (ignored if depth > 1)
     format:        GpuFormat,
     usage:         GpuTextureUsage,
     initial_usage: GpuTextureUsage,
@@ -166,11 +167,11 @@ GpuRawBufferViewDesc :: struct {
 
 GpuTextureViewDesc :: struct {
     kind:        GpuViewKind,
-    format:      GpuFormat,
+    format:      GpuFormat,   // .None uses the texture's own format
     first_mip:   i32,
-    mip_count:   i32,
+    mip_count:   i32,         // 0 = one mip
     first_slice: i32,
-    slice_count: i32,
+    slice_count: i32,         // 0 = every slice from first_slice
 }
 
 GpuCullMode :: enum {
@@ -447,6 +448,10 @@ gpu_texture_upload_size :: proc(texture: GpuTexture, mip: i32, slice: i32) -> i6
 
 gpu_set_texture_data :: proc(cmd: GpuCommandList, texture: GpuTexture, mip: i32, slice: i32, data: []byte, staging: GpuBuffer, staging_offset: i64) {
     _gpu_set_texture_data(cmd, texture, mip, slice, data, staging, staging_offset)
+}
+
+gpu_copy_buffer_to_texture :: proc(cmd: GpuCommandList, dst: GpuTexture, mip: i32, slice: i32, x: i32, y: i32, width: i32, height: i32, src: GpuBuffer, src_offset: i64, src_row_pitch: i32) {
+    _gpu_copy_buffer_to_texture(cmd, dst, mip, slice, x, y, width, height, src, src_offset, src_row_pitch)
 }
 
 gpu_create_pipeline_layout :: proc(desc: GpuPipelineLayoutDesc) -> GpuPipelineLayout {

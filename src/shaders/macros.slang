@@ -7,3 +7,4 @@
 #define PUSH_PTR(T, name)   uint name##_heap_idx; uint name##_offset; property Ptr<T> name { get { return Ptr<T>(name##_heap_idx, name##_offset); } }
 #define PUSH_ARRAY(T, name) uint name##_heap_idx; uint name##_offset; uint name##_count; property Array<T> name { get { return Array<T>(Ptr<T>(name##_heap_idx, name##_offset), name##_count); } }
 #define PUSH_TEXTURE(name)  uint name##_texture; uint name##_sampler; property Texture2 name { get { return Texture2(name##_texture, name##_sampler); } }
+#define PUSH_TEXTURE_ARRAY(name) uint name##_texture; uint name##_sampler; property Texture2Array name { get { return Texture2Array(name##_texture, name##_sampler); } }

@@ -2,6 +2,16 @@ package vg
 
 import "base:intrinsics"
 
+RectF32 :: struct {
+    min: [2]f32,
+    max: [2]f32,
+}
+
+RectI32 :: struct {
+    min: [2]i32,
+    max: [2]i32,
+}
+
 field_ptr :: proc "contextless" (obj: ^$T, $field_name: string) -> ^^T
     where intrinsics.type_has_field(T, field_name),
           intrinsics.type_field_type(T, field_name) == ^T {

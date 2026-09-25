@@ -32,21 +32,26 @@ public struct Texture2 {
     uint texture_idx;
     uint sampler_idx;
 
-    Texture2D<float4> texture() {
-        return getDescriptorFromHandle<Texture2D<float4> >(DescriptorHandle<Texture2D<float4> >(uint2(texture_idx, 0)));
-    }
-
-    SamplerState sampler() {
-        return getDescriptorFromHandle<SamplerState>(DescriptorHandle<SamplerState>(uint2(sampler_idx, 0)));
-    }
-
     float4 sample(float2 uv) {
-        return texture().Sample(sampler(), uv);
+        Texture2D<float4> texture = ResourceDescriptorHeap[texture_idx];
+        SamplerState sampler = SamplerDescriptorHeap[sampler_idx];
+        return texture.Sample(sampler, uv);
     }
 
     float3 sample_normal(float2 uv) {
-        float4 color = texture().Sample(sampler(), uv);
+        float4 color = sample(uv);
         return normalize(color.rgb * 2.0 - 1.0);
+    }
+}
+
+public struct Texture2Array {
+    uint texture_idx;
+    uint sampler_idx;
+
+    float4 sample(float2 uv, int slice) {
+        Texture2DArray<float4> texture = ResourceDescriptorHeap[texture_idx];
+        SamplerState sampler = SamplerDescriptorHeap[sampler_idx];
+        return texture.Sample(sampler, float3(uv, slice));
     }
 }
 

@@ -615,6 +615,34 @@ _gpu_set_texture_data :: proc(handle: GpuCommandList, texture_handle: GpuTexture
 }
 
 @(private="package")
+_gpu_copy_buffer_to_texture :: proc(handle: GpuCommandList, texture_handle: GpuTexture, mip: i32, slice: i32, x: i32, y: i32, width: i32, height: i32, buffer_handle: GpuBuffer, buffer_offset: i64, row_pitch: i32) {
+    cmd := (^CommandList)(handle)
+    texture := (^Texture)(texture_handle)
+    buffer := (^Buffer)(buffer_handle)
+
+    assert(buffer_offset % d3d12.TEXTURE_DATA_PLACEMENT_ALIGNMENT == 0, "gpu_copy_buffer_to_texture: src_offset must be 512-byte aligned")
+    assert(row_pitch % d3d12.TEXTURE_DATA_PITCH_ALIGNMENT == 0, "gpu_copy_buffer_to_texture: src_row_pitch must be 256-byte aligned")
+
+    destination := d3d12.TEXTURE_COPY_LOCATION{ pResource = texture.resource, Type = .SUBRESOURCE_INDEX }
+    destination.SubresourceIndex = u32(mip + slice * texture.mips)
+
+    source := d3d12.TEXTURE_COPY_LOCATION{ pResource = buffer.resource, Type = .PLACED_FOOTPRINT }
+    source.PlacedFootprint = {
+        Offset    = u64(buffer_offset),
+        Footprint = {
+            Format   = format_to_dxgi[texture.format],
+            Width    = u32(x + width),
+            Height   = u32(y + height),
+            Depth    = 1,
+            RowPitch = u32(row_pitch),
+        },
+    }
+
+    box := d3d12.BOX{ left = u32(x), top = u32(y), front = 0, right = u32(x + width), bottom = u32(y + height), back = 1 }
+    cmd.list->CopyTextureRegion(&destination, u32(x), u32(y), 0, &source, &box)
+}
+
+@(private="package")
 _gpu_create_pipeline_layout :: proc(desc: GpuPipelineLayoutDesc) -> GpuPipelineLayout {
     parameter := d3d12.ROOT_PARAMETER1{
         ParameterType    = ._32BIT_CONSTANTS,
@@ -941,7 +969,7 @@ write_texture_view :: proc(texture: ^Texture, desc: GpuTextureViewDesc, heap: ^D
     format := desc.format if desc.format != .None else texture.format
     dxgi_format := format_to_dxgi[format]
     mip_count := max(desc.mip_count, 1)
-    slice_count := max(desc.slice_count, 1)
+    slice_count := desc.slice_count if desc.slice_count > 0 else texture.array_size - desc.first_slice
 
     switch desc.kind {
     case .Srv:
@@ -953,6 +981,15 @@ write_texture_view :: proc(texture: ^Texture, desc: GpuTextureViewDesc, heap: ^D
         srv_desc.Texture2D = {
             MostDetailedMip = u32(desc.first_mip),
             MipLevels       = u32(mip_count),
+        }
+        if texture.array_size > 1 {
+            srv_desc.ViewDimension = .TEXTURE2DARRAY
+            srv_desc.Texture2DArray = {
+                MostDetailedMip = u32(desc.first_mip),
+                MipLevels       = u32(mip_count),
+                FirstArraySlice = u32(desc.first_slice),
+                ArraySize       = u32(slice_count),
+            }
         }
         gpu.device->CreateShaderResourceView(texture.resource, &srv_desc, descriptor_cpu(heap, index))
 
@@ -1413,7 +1450,6 @@ create_back_buffer_views :: proc(swapchain: ^Swapchain) {
             depth      = 1,
             mips       = 1,
             array_size = 1,
-            format     = .RGBA8_Unorm,
         }
         check(swapchain.swapchain->GetBuffer(u32(index), d3d12.IResource_UUID, (^rawptr)(&texture.resource)), "GetBuffer")
         gpu.device->CreateRenderTargetView(texture.resource, nil, descriptor_cpu(&gpu.rtv_heap, swapchain.back_buffer_views[index].index))
@@ -1460,6 +1496,7 @@ format_to_dxgi := [GpuFormat]dxgi.FORMAT {
     .RGBA16_Float      = .R16G16B16A16_FLOAT,
     .RGBA32_Float      = .R32G32B32A32_FLOAT,
     .R32_Float         = .R32_FLOAT,
+    .R8_Unorm          = .R8_UNORM,
     .D32_Float         = .D32_FLOAT,
     .D24_Unorm_S8_Uint = .D24_UNORM_S8_UINT,
 }

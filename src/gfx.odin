@@ -1,6 +1,7 @@
 package vg
 
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:mem/virtual"
 import "core:os"
@@ -21,10 +22,6 @@ GfxTransform :: struct #packed {
     color: [4]f32,
 }
 
-#assert(size_of(GfxVertex) == 32)
-#assert(size_of(GfxCamera) == 64)
-#assert(size_of(GfxTransform) == 80)
-
 GfxMesh :: struct {
     vertices:    GpuBuffer,
     vertex_view: GpuView,
@@ -35,6 +32,20 @@ GfxMesh :: struct {
 GfxTexture :: struct {
     data: GpuTexture,
     view: GpuView,
+}
+
+GfxTextQuad :: struct {
+    pos:     [2]f32,
+    size:    [2]f32,
+    uv_min:  [2]f32,
+    uv_max:  [2]f32,
+    color:   [4]f32,
+    page:    i32,
+    padding: [3]i32,
+}
+
+GfxTextConstants :: struct {
+    screen_size: [2]f32,
 }
 
 GFX_CHECKER_SIZE        :: 64
@@ -54,9 +65,11 @@ Gfx :: struct {
     depth_width:  i32,
     depth_height: i32,
 
-    layout:   GpuPipelineLayout,
-    pipeline: GpuPipeline,
-    sampler:  GpuSampler,
+    layout:        GpuPipelineLayout,
+    pipeline:      GpuPipeline,
+    sampler:       GpuSampler,
+    text_pipeline: GpuPipeline,
+    text_sampler:  GpuSampler,
 
     mesh:    GfxMesh,
     texture: GfxTexture,
@@ -65,6 +78,8 @@ Gfx :: struct {
 gfx: Gfx
 
 gfx_init :: proc() {
+    gfx_font_init()
+
     if err := virtual.arena_init_growing(&gfx.arena); err != nil {
         panic("gfx_init: failed to init the gfx arena")
     }
@@ -81,12 +96,45 @@ gfx_init :: proc() {
         address_w = .Repeat,
     })
 
+    gfx.text_sampler = gpu_create_sampler({
+        min       = .Nearest,
+        mag       = .Nearest,
+        mip       = .Nearest,
+        address_u = .Clamp,
+        address_v = .Clamp,
+        address_w = .Clamp,
+    })
+
     gfx.layout = gpu_create_pipeline_layout({ constant_count = GFX_MESH_CONSTANT_COUNT })
 
     when ODIN_DEBUG {
         shader_watch_init()
     }
     gfx.pipeline = gfx_create_pipeline()
+
+    text_vertex_shader := shader_load("text.vs.dxil")
+    text_pixel_shader := shader_load("text.fs.dxil")
+    defer delete(text_vertex_shader)
+    defer delete(text_pixel_shader)
+
+    text_color_formats := [1]GpuFormat{ GFX_COLOR_FORMAT }
+    gfx.text_pipeline = gpu_create_pipeline({
+        layout        = gfx.layout,
+        vertex_shader = text_vertex_shader,
+        pixel_shader  = text_pixel_shader,
+        color_formats = text_color_formats[:],
+        topology      = .Triangle_List,
+        raster        = { cull = .None },
+        blend         = {
+            enable    = true,
+            src       = .Src_Alpha,
+            dst       = .Inv_Src_Alpha,
+            op        = .Add,
+            src_alpha = .One,
+            dst_alpha = .Inv_Src_Alpha,
+            op_alpha  = .Add,
+        },
+    })
 
     vertices: [24]GfxVertex
     indices:  [36]i32
@@ -192,13 +240,17 @@ gfx_shutdown :: proc() {
     gpu_destroy_view(gfx.mesh.vertex_view)
     gpu_destroy_buffer(gfx.mesh.indices)
     gpu_destroy_buffer(gfx.mesh.vertices)
+    gpu_destroy_pipeline(gfx.text_pipeline)
     gpu_destroy_pipeline(gfx.pipeline)
     gpu_destroy_pipeline_layout(gfx.layout)
+    gpu_destroy_sampler(gfx.text_sampler)
     gpu_destroy_sampler(gfx.sampler)
     gpu_destroy_fence(gfx.gpu_arena_fence)
 
     gpu_arena_release(gfx.gpu_arena)
     virtual.arena_destroy(&gfx.arena)
+
+    gfx_font_shutdown()
 }
 
 gfx_render :: proc(frame: ^FrameContext) {
@@ -242,6 +294,8 @@ gfx_render :: proc(frame: ^FrameContext) {
     back_buffer_view := gpu_back_buffer_view(frame.swapchain)
     gpu_barrier(cmd, GpuTextureBarrier{ texture = back_buffer, before = {.Present}, after = {.Rtv} })
 
+    // cube
+
     gpu_set_render_target(cmd, back_buffer_view, gfx.depth_view)
     gpu_clear_render_target(cmd, back_buffer_view, {0.05, 0.06, 0.09, 1.0})
     gpu_clear_depth_stencil(cmd, gfx.depth_view)
@@ -257,6 +311,64 @@ gfx_render :: proc(frame: ^FrameContext) {
     c_idx = gpu_push_constant(cmd, c_idx, gfx.texture.view)
     gpu_push_constant(cmd, c_idx, gfx.sampler)
     gpu_draw_indexed(cmd, gfx.mesh.index_count)
+
+    // text
+
+    runs := make([]GfxFontRun, len(frame.texts), context.temp_allocator)
+    quad_capacity := 0
+    for text, index in frame.texts {
+        runs[index] = gfx_font_run(text.face, text.size_in_point, text.text)
+        quad_capacity += len(runs[index].glyphs)
+    }
+    quad_capacity += int(gfx_font_atlas_count())
+    gfx_font_flush(cmd)
+
+    quads, quads_ptr := gpu_arena_push(gfx.gpu_arena, GfxTextQuad, i64(quad_capacity))
+    quad_count : i32 = 0
+    constants, constants_ptr := gpu_arena_push(gfx.gpu_arena, GfxTextConstants)
+    constants.screen_size = { f32(width), f32(height) }
+
+    atlas_scale := 1.0 / f32(gfx_font_atlas_size)
+    for run, index in runs {
+        color := frame.texts[index].color
+        pen := [2]f32{ math.round(frame.texts[index].origin.x), frame.texts[index].origin.y }
+        for glyph in run.glyphs {
+            if glyph.subrect.max.x > glyph.subrect.min.x {
+                quads[quad_count] = {
+                    pos    = pen + glyph.bearing,
+                    size   = glyph.subrect.max - glyph.subrect.min,
+                    uv_min = glyph.subrect.min * atlas_scale,
+                    uv_max = glyph.subrect.max * atlas_scale,
+                    color  = color,
+                    page   = glyph.page,
+                }
+                quad_count += 1
+            }
+            pen.x += glyph.advance
+        }
+    }
+
+    for index in 0 ..< gfx_font_atlas_count() {
+        quads[quad_count] = {
+            pos    = { 0, f32(index * gfx_font_atlas_size) },
+            size   = { gfx_font_atlas_size, gfx_font_atlas_size },
+            uv_min = { 0, 0 },
+            uv_max = { 1, 1 },
+            color  = { 1, 1, 1, 1 },
+            page   = index,
+        }
+        quad_count += 1
+    }
+
+    gpu_set_render_target(cmd, back_buffer_view)
+    gpu_set_pipeline(cmd, gfx.text_pipeline)
+
+    c_idx = 0
+    c_idx = gpu_push_constant(cmd, c_idx, quads_ptr)
+    c_idx = gpu_push_constant(cmd, c_idx, constants_ptr)
+    c_idx = gpu_push_constant(cmd, c_idx, gfx_font_atlas_view())
+    gpu_push_constant(cmd, c_idx, gfx.text_sampler)
+    gpu_draw(cmd, 6, quad_count)
 
     gpu_barrier(cmd, GpuTextureBarrier{ texture = back_buffer, before = {.Rtv}, after = {.Present} })
     gpu_command_list_end(cmd)
