@@ -180,7 +180,7 @@ gfx_font_run :: proc(face: GfxFontFace, size_in_point: f32, str: string, allocat
                         atlas.dirty = subrect
                     }
                 } else {
-                    if gfx_font.atlas_full == true {
+                    if gfx_font.atlas_full == false {
                         fmt.printfln("gfx_font: atlas full (%v pages) - resetting at the end of the frame", gfx_font.atlas_count)
                     }
                     gfx_font.atlas_full = true
