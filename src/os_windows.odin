@@ -1,5 +1,4 @@
 #+build windows
-#+private file
 package vg
 
 import "base:runtime"
@@ -7,24 +6,146 @@ import win32 "core:sys/windows"
 import "core:mem"
 import "core:unicode/utf8"
 import "fiber"
-import "core:fmt"
 
-event_list:        OsEventList
-winproc_context:   runtime.Context
-event_allocator:   mem.Allocator
-event_fiber:       ^fiber.Fiber
-from_fiber:        ^fiber.Fiber
-last_absolute_x:   int
-last_absolute_y:   int
+main :: proc() {
+    win32.SetConsoleOutputCP(.UTF8)
 
-MIN_CLIENT_WIDTH  :: 128
-MIN_CLIENT_HEIGHT :: 96
+    // dpi awareness
 
+    SetProcessDpiAwarenessContextProc :: #type proc "system" (value: win32.DPI_AWARENESS_CONTEXT) -> win32.BOOL
+    set_dpi_awareness_context: SetProcessDpiAwarenessContextProc
+    user32 := win32.LoadLibraryW(win32.L("user32.dll"))
+    if user32 != nil {
+        set_dpi_awareness_context = SetProcessDpiAwarenessContextProc(win32.GetProcAddress(user32, "SetProcessDpiAwarenessContext"))
+        win32.FreeLibrary(user32)
+    }
+    if set_dpi_awareness_context != nil {
+        set_dpi_awareness_context(win32.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+    } else {
+        SetProcessDpiAwarenessProc :: #type proc "system" (value: win32.PROCESS_DPI_AWARENESS) -> win32.HRESULT
+        shcore := win32.LoadLibraryW(win32.L("shcore.dll"))
+        if shcore != nil {
+            set_process_dpi_awareness := SetProcessDpiAwarenessProc(win32.GetProcAddress(shcore, "SetProcessDpiAwareness"))
+            set_process_dpi_awareness(.PROCESS_PER_MONITOR_DPI_AWARE)
+            win32.FreeLibrary(shcore)
+        } else {
+            win32.SetProcessDPIAware()
+        }
+    }
+
+    // fibers
+
+    event_fiber = fiber.create(fiber_proc, stack_size = mem.Kilobyte * 256)
+    main_fiber := fiber.convert_thread_to_fiber()
+    defer fiber.destroy(event_fiber)
+    defer fiber.convert_fiber_to_thread(main_fiber)
+    winproc_context = context
+    event_allocator = context.temp_allocator
+    from_fiber = main_fiber
+
+    // window
+
+    instance := win32.HINSTANCE(win32.GetModuleHandleW(nil))
+    class_name: win32.wstring = win32.L("vg_odin_window_class")
+    window_class := win32.WNDCLASSEXW{
+        cbSize        = size_of(win32.WNDCLASSEXW),
+        style         = win32.CS_HREDRAW | win32.CS_VREDRAW,
+        lpfnWndProc   = win_proc,
+        hInstance     = instance,
+        hCursor       = win32.LoadCursorA(nil, win32.IDC_ARROW),
+        lpszClassName = class_name,
+    }
+    win32.RegisterClassExW(&window_class)
+
+    window := new(Win32Window)
+    defer free(window)
+    window.hwnd = win32.CreateWindowExW(0, class_name, win32.L("vg_odin"), win32.WS_OVERLAPPEDWINDOW, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, nil, nil, instance, window)
+    hwnd := window.hwnd
+
+    raw_devices := [2]win32.RAWINPUTDEVICE{
+        {
+            usUsagePage = win32.HID_USAGE_PAGE_GENERIC,
+            usUsage     = win32.HID_USAGE_GENERIC_KEYBOARD,
+            hwndTarget  = hwnd,
+        },
+        {
+            usUsagePage = win32.HID_USAGE_PAGE_GENERIC,
+            usUsage     = win32.HID_USAGE_GENERIC_MOUSE,
+            hwndTarget  = hwnd,
+        },
+    }
+    win32.RegisterRawInputDevices(&raw_devices[0], len(raw_devices), size_of(win32.RAWINPUTDEVICE))
+
+    // state initalization
+
+    update_key_names()
+
+    point: win32.POINT
+    win32.GetCursorPos(&point)
+    last_absolute_x = int(point.x)
+    last_absolute_y = int(point.y)
+
+    win32.ShowWindow(hwnd, win32.SW_SHOW)
+    entry(WindowHandle(window))
+}
+
+_os_poll_events :: proc(allocator: mem.Allocator) -> OsEventList {
+    event_list = {}
+    winproc_context = context
+    event_allocator = allocator
+    from_fiber = fiber.current()
+    fiber.switch_to(event_fiber)
+    return event_list
+}
+
+_os_mouse_position :: proc(window: WindowHandle) -> (width: i32, height: i32) {
+    return cursor_client_pos((^Win32Window)(window).hwnd)
+}
+
+_os_window_size :: proc(window: WindowHandle) -> (width: i32, height: i32) {
+    win32_window := (^Win32Window)(window)
+    rect: win32.RECT
+    win32.GetClientRect(win32_window.hwnd, &rect)
+    return i32(rect.right - rect.left), i32(rect.bottom - rect.top)
+}
+
+_os_window_hwnd :: proc(window: WindowHandle) -> win32.HWND {
+    return (^Win32Window)(window).hwnd
+}
+
+/* internals */
+
+@(private="file")
+min_client_width  :: 128
+@(private="file")
+min_client_height :: 96
+
+@(private="file")
 Win32Window :: struct {
     hwnd:       win32.HWND,
     minimized:  bool,
 }
 
+@(private="file")
+event_list:        OsEventList
+@(private="file")
+winproc_context:   runtime.Context
+@(private="file")
+event_allocator:   mem.Allocator
+@(private="file")
+event_fiber:       ^fiber.Fiber
+@(private="file")
+from_fiber:        ^fiber.Fiber
+@(private="file")
+last_absolute_x:   int
+@(private="file")
+last_absolute_y:   int
+@(private="file")
+dummy_window: Win32Window
+@(private="file")
+key_name_storage: [OsKey][4]u8
+
+@(private="file")
 push_event :: proc (kind: OsEventKind, window: WindowHandle) -> ^OsEvent {
     event := new(OsEvent, allocator = event_allocator)
     event.kind = kind
@@ -33,6 +154,7 @@ push_event :: proc (kind: OsEventKind, window: WindowHandle) -> ^OsEvent {
     return event
 }
 
+@(private="file")
 push_key_event :: proc(kind: OsEventKind, window: WindowHandle, key: OsKey) -> ^OsEvent {
     event := push_event(kind, window)
     event.key = key
@@ -48,12 +170,13 @@ push_key_event :: proc(kind: OsEventKind, window: WindowHandle, key: OsKey) -> ^
     return event
 }
 
-dummy_window: Win32Window
+@(private="file")
 win32_window_from_hwnd :: proc (hwnd: win32.HWND) -> ^Win32Window {
     win32_window := (^Win32Window)(uintptr(win32.GetWindowLongPtrW(hwnd, win32.GWLP_USERDATA)))
     return win32_window != nil ? win32_window : &dummy_window
 }
 
+@(private="file")
 win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPARAM, lparam: win32.LPARAM) -> win32.LRESULT {
     context = winproc_context
     window := win32_window_from_hwnd(hwnd)
@@ -190,7 +313,7 @@ win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPAR
         result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     case win32.WM_GETMINMAXINFO:
-        rect := win32.RECT{ 0, 0, MIN_CLIENT_WIDTH, MIN_CLIENT_HEIGHT }
+        rect := win32.RECT{ 0, 0, min_client_width, min_client_height }
         win32.AdjustWindowRect(&rect, win32.WS_OVERLAPPEDWINDOW, false)
         info := (^win32.MINMAXINFO)(uintptr(lparam))
         info.ptMinTrackSize = { rect.right - rect.left, rect.bottom - rect.top }
@@ -225,6 +348,7 @@ win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPAR
     return result
 }
 
+@(private="file")
 fiber_proc :: proc(f: ^fiber.Fiber) {
     for {
         msg: win32.MSG
@@ -237,34 +361,7 @@ fiber_proc :: proc(f: ^fiber.Fiber) {
     }
 }
 
-@(private="package")
-_os_mouse_position :: proc(window: WindowHandle) -> (width: i32, height: i32) {
-    return cursor_client_pos((^Win32Window)(window).hwnd)
-}
-
-@(private="package")
-_os_window_size :: proc(window: WindowHandle) -> (width: i32, height: i32) {
-    win32_window := (^Win32Window)(window)
-    rect: win32.RECT
-    win32.GetClientRect(win32_window.hwnd, &rect)
-    return i32(rect.right - rect.left), i32(rect.bottom - rect.top)
-}
-
-@(private="package")
-_os_window_hwnd :: proc(window: WindowHandle) -> win32.HWND {
-    return (^Win32Window)(window).hwnd
-}
-
-@(private="package")
-_os_poll_events :: proc(allocator: mem.Allocator) -> OsEventList {
-    event_list = {}
-    winproc_context = context
-    event_allocator = allocator
-    from_fiber = fiber.current()
-    fiber.switch_to(event_fiber)
-    return event_list
-}
-
+@(private="file")
 update_key_names :: proc() {
     for key, code in scancode_to_key {
         if key == .None {
@@ -283,6 +380,7 @@ update_key_names :: proc() {
     }
 }
 
+@(private="file")
 win_key_to_os_key :: proc(keyboard: win32.RAWKEYBOARD) -> OsKey {
     if int(keyboard.VKey) == 0xFF {
         return .None
@@ -303,6 +401,7 @@ win_key_to_os_key :: proc(keyboard: win32.RAWKEYBOARD) -> OsKey {
     return scancode_to_key[code]
 }
 
+@(private="file")
 cursor_client_pos :: proc(hwnd: win32.HWND) -> (x, y: i32) {
     point: win32.POINT
     win32.GetCursorPos(&point)
@@ -310,92 +409,7 @@ cursor_client_pos :: proc(hwnd: win32.HWND) -> (x, y: i32) {
     return i32(point.x), i32(point.y)
 }
 
-@(private="package")
-main :: proc() {
-    win32.SetConsoleOutputCP(.UTF8)
-
-    // dpi awareness
-
-    SetProcessDpiAwarenessContextProc :: #type proc "system" (value: win32.DPI_AWARENESS_CONTEXT) -> win32.BOOL
-    set_dpi_awareness_context: SetProcessDpiAwarenessContextProc
-    user32 := win32.LoadLibraryW(win32.L("user32.dll"))
-    if user32 != nil {
-        set_dpi_awareness_context = SetProcessDpiAwarenessContextProc(win32.GetProcAddress(user32, "SetProcessDpiAwarenessContext"))
-        win32.FreeLibrary(user32)
-    }
-    if set_dpi_awareness_context != nil {
-        set_dpi_awareness_context(win32.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
-    } else {
-        SetProcessDpiAwarenessProc :: #type proc "system" (value: win32.PROCESS_DPI_AWARENESS) -> win32.HRESULT
-        shcore := win32.LoadLibraryW(win32.L("shcore.dll"))
-        if shcore != nil {
-            set_process_dpi_awareness := SetProcessDpiAwarenessProc(win32.GetProcAddress(shcore, "SetProcessDpiAwareness"))
-            set_process_dpi_awareness(.PROCESS_PER_MONITOR_DPI_AWARE)
-            win32.FreeLibrary(shcore)
-        } else {
-            win32.SetProcessDPIAware()
-        }
-    }
-
-
-    // fibers
-
-    event_fiber = fiber.create(fiber_proc, stack_size = mem.Kilobyte * 256)
-    main_fiber := fiber.convert_thread_to_fiber()
-    defer fiber.destroy(event_fiber)
-    defer fiber.convert_fiber_to_thread(main_fiber)
-    winproc_context = context
-    event_allocator = context.temp_allocator
-    from_fiber = main_fiber
-
-    // window
-
-    instance := win32.HINSTANCE(win32.GetModuleHandleW(nil))
-    class_name: win32.wstring = win32.L("vg_odin_window_class")
-    window_class := win32.WNDCLASSEXW{
-        cbSize        = size_of(win32.WNDCLASSEXW),
-        style         = win32.CS_HREDRAW | win32.CS_VREDRAW,
-        lpfnWndProc   = win_proc,
-        hInstance     = instance,
-        hCursor       = win32.LoadCursorA(nil, win32.IDC_ARROW),
-        lpszClassName = class_name,
-    }
-    win32.RegisterClassExW(&window_class)
-
-    window := new(Win32Window)
-    defer free(window)
-    window.hwnd = win32.CreateWindowExW(0, class_name, win32.L("vg_odin"), win32.WS_OVERLAPPEDWINDOW, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, nil, nil, instance, window)
-    hwnd := window.hwnd
-
-    raw_devices := [2]win32.RAWINPUTDEVICE{
-        {
-            usUsagePage = win32.HID_USAGE_PAGE_GENERIC,
-            usUsage     = win32.HID_USAGE_GENERIC_KEYBOARD,
-            hwndTarget  = hwnd,
-        },
-        {
-            usUsagePage = win32.HID_USAGE_PAGE_GENERIC,
-            usUsage     = win32.HID_USAGE_GENERIC_MOUSE,
-            hwndTarget  = hwnd,
-        },
-    }
-    win32.RegisterRawInputDevices(&raw_devices[0], len(raw_devices), size_of(win32.RAWINPUTDEVICE))
-
-    // state initalization
-
-    update_key_names()
-
-    point: win32.POINT
-    win32.GetCursorPos(&point)
-    last_absolute_x = int(point.x)
-    last_absolute_y = int(point.y)
-
-    win32.ShowWindow(hwnd, win32.SW_SHOW)
-    entry(WindowHandle(window))
-}
-
-key_name_storage: [OsKey][4]u8
-
+@(private="file")
 scancode_to_key := [128]OsKey{
     win32.KB_A = .A,
     win32.KB_B = .B,
@@ -497,6 +511,7 @@ scancode_to_key := [128]OsKey{
     win32.KB_NONUS_SLASHBAR = .ISO_Backslash,
 }
 
+@(private="file")
 extended_scancode_to_key := [128]OsKey{
     win32.KB_RIGHTCONTROL & 0xFF = .Right_Ctrl,
     win32.KB_RIGHTALT & 0xFF = .Right_Alt,
