@@ -84,7 +84,6 @@ _open :: proc(path: string) -> (face: Face, metrics: FaceMetrics) {
     for candidate in candidates {
         font_file: ^IFontFile
         if dwrite.factory->CreateFontFileReference(win32.utf8_to_wstring(candidate, context.temp_allocator), nil, &font_file) != win32.S_OK {
-            fmt.println("failed to open ", candidate);
             continue
         }
 
@@ -93,7 +92,6 @@ _open :: proc(path: string) -> (face: Face, metrics: FaceMetrics) {
         result := dwrite.factory->CreateFontFace(.TRUETYPE, 1, raw_data(files[:]), 0, .NONE, &font_face)
         font_file->Release()
         if result != win32.S_OK {
-            fmt.println("not ok for ", candidate)
             continue
         }
 
