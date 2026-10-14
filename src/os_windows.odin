@@ -193,7 +193,13 @@ win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPAR
     case win32.WM_DESTROY:
         push_event(.Window_Close, WindowHandle(window))
         win32.PostQuitMessage(0)
-        result = 0
+
+    case win32.WM_PAINT:
+        ps: win32.PAINTSTRUCT
+        win32.BeginPaint(hwnd, &ps)
+        fiber.switch_to(from_fiber)
+        win32.EndPaint(hwnd, &ps)
+        win32.DwmFlush()
 
     case win32.WM_SIZE:
         if wparam == win32.SIZE_MINIMIZED {
@@ -295,9 +301,9 @@ win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPAR
                 event := push_event(.Scroll, WindowHandle(window))
                 event.pos_x, event.pos_y = cursor_client_pos(hwnd)
                 if button_flags & win32.RI_MOUSE_HWHEEL != 0 {
-                    event.delta_x = i32(mouse.usButtonData)
+                    event.delta_x = i32(transmute(i16)mouse.usButtonData)
                 } else {
-                    event.delta_y = i32(mouse.usButtonData)
+                    event.delta_y = i32(transmute(i16)mouse.usButtonData)
                 }
             }
         }
@@ -338,8 +344,7 @@ win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPAR
         //}
 
         result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)
-        fiber.switch_to(from_fiber)
-        win32.DwmFlush()
+        //fiber.switch_to(from_fiber)
 
     case:
         result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)

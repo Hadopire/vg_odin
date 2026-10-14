@@ -12,6 +12,16 @@ RectI32 :: struct {
     max: [2]i32,
 }
 
+rect_contains :: proc "contextless" (rect: RectF32, point: [2]f32) -> bool {
+    return point.x >= rect.min.x && point.y >= rect.min.y && point.x < rect.max.x && point.y < rect.max.y
+}
+
+rect_intersect :: proc "contextless" (a: RectF32, b: RectF32) -> RectF32 {
+    top_left := [2]f32{ max(a.min.x, b.min.x), max(a.min.y, b.min.y) }
+    bottom_right := [2]f32{ max(min(a.max.x, b.max.x), top_left.x), max(min(a.max.y, b.max.y), top_left.y) }
+    return { top_left, bottom_right }
+}
+
 field_ptr :: proc "contextless" (obj: ^$T, $field_name: string) -> ^^T
     where intrinsics.type_has_field(T, field_name),
           intrinsics.type_field_type(T, field_name) == ^T {

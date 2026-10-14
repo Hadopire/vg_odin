@@ -253,6 +253,7 @@ descriptor_heap_init :: proc(heap: ^DescriptorHeap, type: d3d12.DESCRIPTOR_HEAP_
     heap.type = type
     heap.stride = i32(gpu.device->GetDescriptorHandleIncrementSize(type))
     heap.capacity = capacity
+    heap.used = 1
     heap.temp_capacity = temp_capacity
     heap.shader_visible = shader_visible
 

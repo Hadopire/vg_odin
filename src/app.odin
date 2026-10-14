@@ -14,11 +14,12 @@ FrameContext :: struct {
     dt:              f32,
     time:            f32,
     resolution:      [2]f32,
+    cursor:           [2]f32,
     swapchain:       GpuSwapchain,
     view_projection: matrix[4, 4]f32,
     cube_transform:  matrix[4, 4]f32,
     cube_color:      [4]f32,
-    texts:           []GfxFontText,
+    ui:              []^UiBox,
     os_events:       OsEventList,
     window:          WindowHandle,
 }
@@ -26,6 +27,7 @@ FrameContext :: struct {
 AppContext :: struct {
     render_counter:  ^JobCounter,
     face:            GfxFontFace,
+    ui_cache:        UiCache,
     cursor:          [2]f32,
     async_rendering: bool,
     done:            bool,
@@ -94,35 +96,156 @@ update :: proc(app: ^AppContext, frame: ^FrameContext) {
     frame.view_projection = projection * view
     frame.cube_transform = linalg.matrix4_translate_f32(cube_position) * rotation
 
-    texts := make([dynamic]GfxFontText, 0, 32, frame.allocator)
-    line_top : f32 = 16
-    for size_in_point in ([]f32{ 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 18, 20, 24, 28, 32, 36 }) {
-        metrics := gfx_font_metrics(app.face, size_in_point)
-        append(&texts, GfxFontText{
-            face          = app.face,
-            size_in_point = size_in_point,
-            origin        = { gfx_font_atlas_size + 16, line_top + metrics.ascent },
-            color         = { 1, 1, 1, 1 },
-            text          = fmt.aprintf("%vpt Blasts the target with energy, dealing ([148.7% of Spell Power]) Arcane damage.", size_in_point, allocator = frame.allocator),
-        })
-        line_top += metrics.line_height
+    frame.cursor = app.cursor
+    ui_begin(frame^, &app.ui_cache)
+    ui_push_font_face(app.face)
+
+    ui_push_pref_width({ kind = .Percent_Of_Parent, value = 1, strictness = 1 })
+    ui_push_pref_height({ kind = .Children_Sum, strictness = 1 })
+    ui_row_begin({.Draw_Background}, "menu_bar")
+    ui_pop_pref_height()
+    ui_pop_pref_width()
+
+    ui_push_background_color({ 0.22, 0.24, 0.3, 1 })
+    ui_push_corner_radius(4)
+    ui_push_text_padding(8)
+    ui_push_pref_width({ kind = .Text_Content, strictness = 1 })
+    ui_push_pref_height({ kind = .Text_Content, strictness = 1 })
+    for name in ([]string{ "File", "Edit", "View", "Window", "Help" }) {
+        if .Clicked in ui_button(name).flags {
+            fmt.println("clicked", name)
+        }
     }
-    for line in ([]string{
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz",
-        "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
-        "coucou la djobiteam, COUCOU LA COMPAGNIE SAVA OU KOI KE SE SOIIIILLE",
-    }) {
-        metrics := gfx_font_metrics(app.face, 12)
-        append(&texts, GfxFontText{
-            face          = app.face,
-            size_in_point = 12,
-            origin        = { gfx_font_atlas_size + 16, line_top + metrics.ascent },
-            color         = { 0.8, 0.85, 1, 1 },
-            text          = line,
-        })
-        line_top += metrics.line_height
+    ui_pop_pref_height()
+    ui_pop_pref_width()
+    ui_pop_text_padding()
+    ui_pop_corner_radius()
+    ui_pop_background_color()
+    ui_row_end()
+
+    ui_spacer({ kind = .Pixels, value = 24 })
+
+    ui_push_pref_width({ kind = .Children_Sum })
+    ui_push_pref_height({ kind = .Children_Sum, strictness = 0 })
+    ui_push_corner_radius(8)
+    ui_column_begin({.Draw_Drop_Shadow, .Draw_Background, .Draw_Border, .Clip})
+    ui_pop_corner_radius()
+    ui_pop_pref_height()
+    ui_pop_pref_width()
+
+    ui_push_text_padding(8)
+    ui_push_pref_width({ kind = .Text_Content, strictness = 1 })
+    ui_push_pref_height({ kind = .Text_Content, strictness = 1 })
+    for size_in_point in ([]f32{ 9, 11, 14, 20 }) {
+        ui_push_font_size(size_in_point)
+        ui_label(fmt.tprintf("A %vpt label in a Children_Sum panel", size_in_point))
+        ui_pop_font_size()
     }
-    frame.texts = texts[:]
+    ui_pop_pref_height()
+    ui_pop_pref_width()
+    ui_pop_text_padding()
+    ui_column_end()
+
+    ui_spacer({ kind = .Pixels, value = 100, strictness = 0 })
+
+    ui_push_pref_width({ kind = .Pixels, value = 500, strictness = 1 })
+    ui_push_pref_height({ kind = .Pixels, value = 100, strictness = 1 })
+    ui_push_background_color([4]f32{1,1,1,1})
+    ui_push_text_color([4]f32{0,0,0,1})
+    ui_row_begin({.Draw_Background}, "panel")
+
+    ui_push_pref_width({ kind = .Text_Content, strictness = 1 })
+    ui_push_pref_height({ kind = .Text_Content, strictness = 1 })
+    ui_push_background_color({ 0.85, 0.3, 0.3, 1 })
+    ui_push_text_padding(8)
+    floating := ui_box_make({.Floating_X, .Floating_Y, .Draw_Background, .Draw_Text}, "Floating")
+    floating.rel_position = { 300, 30 }
+    ui_pop_text_padding()
+    ui_pop_background_color()
+    ui_pop_pref_height()
+    ui_pop_pref_width()
+
+    ui_spacer({ kind = .Percent_Of_Parent, value = 1 })
+
+    ui_push_pref_width({ kind = .Children_Sum, strictness = 1 })
+    ui_push_pref_height({ kind = .Percent_Of_Parent, value = 1, strictness = 0 })
+    ui_column_begin()
+    ui_pop_pref_height()
+    ui_pop_pref_width()
+    ui_spacer({ kind = .Percent_Of_Parent, value = 1 })
+
+    ui_push_pref_height({ kind = .Text_Content, strictness = 1})
+    ui_push_pref_width({ kind = .Text_Content, strictness = 1})
+    ui_label("->HELLO CENTER<-")
+    ui_pop_pref_width()
+    ui_pop_pref_height()
+
+    ui_spacer({ kind = .Percent_Of_Parent, value = 1 })
+    ui_column_end()
+
+    ui_spacer({ kind = .Percent_Of_Parent, value = 1 })
+    ui_row_end()
+
+    ui_pop_text_color()
+    ui_pop_background_color()
+    ui_pop_pref_height()
+    ui_pop_pref_width()
+
+    ui_spacer({ kind = .Pixels, value = 16, strictness = 1 })
+
+    ui_push_pref_width({ kind = .Pixels, value = 200, strictness = 1 })
+    ui_push_pref_height({ kind = .Pixels, value = 40, strictness = 1 })
+    ui_row_begin({.Clip, .Draw_Background, .Draw_Border}, "clip_demo")
+    ui_pop_pref_height()
+    ui_pop_pref_width()
+    ui_push_pref_width({ kind = .Text_Content, strictness = 1 })
+    ui_push_pref_height({ kind = .Percent_Of_Parent, value = 1, strictness = 1 })
+    ui_push_text_padding(8)
+    ui_label("Clip:")
+    if .Clicked in ui_button("JSUIS COUPE DU CUL").flags {
+        fmt.println("clip click")
+    }
+    ui_pop_text_padding()
+    ui_pop_pref_height()
+    ui_pop_pref_width()
+    ui_row_end()
+
+    ui_spacer({ kind = .Pixels, value = 16, strictness = 1 })
+
+    ui_push_pref_width({ kind = .Children_Sum, strictness = 1 })
+    ui_push_pref_height({ kind = .Children_Sum, strictness = 1 })
+    ui_row_begin()
+    ui_pop_pref_height()
+    ui_pop_pref_width()
+    for name in ([]string{ "scroll_pixels", "scroll_percent" }) {
+        flags := UiBoxFlags{.Clip, .View_Scroll_Y, .Draw_Background, .Draw_Border}
+        if name == "scroll_percent" {
+            flags += {.View_Scroll_Percent}
+        }
+        ui_push_pref_width({ kind = .Pixels, value = 200, strictness = 1 })
+        ui_push_pref_height({ kind = .Pixels, value = 120, strictness = 1 })
+        region := ui_column_begin(flags, name)
+        ui_pop_pref_height()
+        ui_pop_pref_width()
+
+        ui_push_pref_width({ kind = .Text_Content, strictness = 1 })
+        ui_push_pref_height({ kind = .Text_Content, strictness = 1 })
+        ui_push_text_padding(8)
+        for line in ([]string{ "Sloubi 1", "Sloubi 2", "Sloubi 3", "Sloubi 4", "Sloubi 5", "Sloubi 6", "ABOBA", "lbp", "fddr", "cclpo", "asdasdasd", "asdasdasd", "asdasdasd", "asdasdasd", "asdasdasd", "Asdasdasd", "asdasdasd"}) {
+            ui_label(line)
+        }
+        ui_pop_text_padding()
+        ui_pop_pref_height()
+        ui_pop_pref_width()
+        ui_column_end()
+        ui_signal(region)
+
+        ui_spacer({ kind = .Pixels, value = 16, strictness = 1 })
+    }
+    ui_row_end()
+
+    ui_pop_font_face()
+    ui_end()
 }
 
 render_job :: proc(data: rawptr, index: i32) {
@@ -145,7 +268,7 @@ entry :: proc(window: WindowHandle) {
     defer gfx_shutdown()
 
     app: AppContext
-    app.face = gfx_font_open("IbarraRealNova-Regular.ttf")
+    app.face = gfx_font_open("Quicksand-Regular.ttf")
 
     frame_contexts: [2]FrameContext
     for &frame in frame_contexts {
@@ -188,6 +311,8 @@ entry :: proc(window: WindowHandle) {
             wait_and_release_counter(app.render_counter)
             app.render_counter = nil
         }
+
+        frame.ui = ui_layout()
 
         if app.async_rendering {
             app.render_counter = job_schedule(.High, render_job, frame)

@@ -38,6 +38,12 @@ public struct Texture2 {
         return texture.Sample(sampler, uv);
     }
 
+    float4 sample_non_uniform(float2 uv) {
+        Texture2D<float4> texture = ResourceDescriptorHeap[NonUniformResourceIndex(texture_idx)];
+        SamplerState sampler = SamplerDescriptorHeap[NonUniformResourceIndex(sampler_idx)];
+        return texture.Sample(sampler, uv);
+    }
+
     float3 sample_normal(float2 uv) {
         float4 color = sample(uv);
         return normalize(color.rgb * 2.0 - 1.0);
@@ -48,10 +54,10 @@ public struct Texture2Array {
     uint texture_idx;
     uint sampler_idx;
 
-    float4 sample(float2 uv, int slice) {
+    float4 sample(float3 uv) {
         Texture2DArray<float4> texture = ResourceDescriptorHeap[texture_idx];
         SamplerState sampler = SamplerDescriptorHeap[sampler_idx];
-        return texture.Sample(sampler, float3(uv, slice));
+        return texture.Sample(sampler, uv);
     }
 }
 

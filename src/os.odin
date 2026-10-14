@@ -34,6 +34,7 @@ OsEvent :: struct {
     pos_y:     i32,
     delta_x:   i32,
     delta_y:   i32,
+    consumed:  bool,
 }
 
 OsEventList :: struct {

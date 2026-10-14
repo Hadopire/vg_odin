@@ -34,17 +34,18 @@ GfxTexture :: struct {
     view: GpuView,
 }
 
-GfxTextQuad :: struct {
-    pos:     [2]f32,
-    size:    [2]f32,
-    uv_min:  [2]f32,
-    uv_max:  [2]f32,
-    color:   [4]f32,
-    page:    i32,
-    padding: [3]i32,
+GfxRect :: struct {
+    dst:              RectF32,
+    uv:               RectF32,
+    clip:             RectF32,
+    colors:           [4][4]u8,
+    corner_radius:    f32,
+    edge_softness:    f32, // zero still antialiases the edge over one pixel
+    border_thickness: f32, // zero fills the rect instead of outlining it
+    texture:          i32, // zero draws untextured, at full coverage
 }
 
-GfxTextConstants :: struct {
+GfxUiConstants :: struct {
     screen_size: [2]f32,
 }
 
@@ -68,8 +69,8 @@ Gfx :: struct {
     layout:        GpuPipelineLayout,
     pipeline:      GpuPipeline,
     sampler:       GpuSampler,
-    text_pipeline: GpuPipeline,
-    text_sampler:  GpuSampler,
+    ui_pipeline:   GpuPipeline,
+    ui_sampler:    GpuSampler,
 
     mesh:    GfxMesh,
     texture: GfxTexture,
@@ -96,7 +97,7 @@ gfx_init :: proc() {
         address_w = .Repeat,
     })
 
-    gfx.text_sampler = gpu_create_sampler({
+    gfx.ui_sampler = gpu_create_sampler({
         min       = .Nearest,
         mag       = .Nearest,
         mip       = .Nearest,
@@ -112,18 +113,18 @@ gfx_init :: proc() {
     }
     gfx.pipeline = gfx_create_pipeline()
 
-    text_vertex_shader := shader_load("text.vs.dxil")
-    text_pixel_shader := shader_load("text.fs.dxil")
-    defer delete(text_vertex_shader)
-    defer delete(text_pixel_shader)
+    ui_vertex_shader := shader_load("ui.vs.dxil")
+    ui_pixel_shader := shader_load("ui.fs.dxil")
+    defer delete(ui_vertex_shader)
+    defer delete(ui_pixel_shader)
 
-    text_color_formats := [1]GpuFormat{ GFX_COLOR_FORMAT }
-    gfx.text_pipeline = gpu_create_pipeline({
+    ui_color_formats := [1]GpuFormat{ GFX_COLOR_FORMAT }
+    gfx.ui_pipeline = gpu_create_pipeline({
         layout        = gfx.layout,
-        vertex_shader = text_vertex_shader,
-        pixel_shader  = text_pixel_shader,
-        color_formats = text_color_formats[:],
-        topology      = .Triangle_List,
+        vertex_shader = ui_vertex_shader,
+        pixel_shader  = ui_pixel_shader,
+        color_formats = ui_color_formats[:],
+        topology      = .Triangle_Strip,
         raster        = { cull = .None },
         blend         = {
             enable    = true,
@@ -240,10 +241,10 @@ gfx_shutdown :: proc() {
     gpu_destroy_view(gfx.mesh.vertex_view)
     gpu_destroy_buffer(gfx.mesh.indices)
     gpu_destroy_buffer(gfx.mesh.vertices)
-    gpu_destroy_pipeline(gfx.text_pipeline)
+    gpu_destroy_pipeline(gfx.ui_pipeline)
     gpu_destroy_pipeline(gfx.pipeline)
     gpu_destroy_pipeline_layout(gfx.layout)
-    gpu_destroy_sampler(gfx.text_sampler)
+    gpu_destroy_sampler(gfx.ui_sampler)
     gpu_destroy_sampler(gfx.sampler)
     gpu_destroy_fence(gfx.gpu_arena_fence)
 
@@ -312,63 +313,82 @@ gfx_render :: proc(frame: ^FrameContext) {
     gpu_push_constant(cmd, c_idx, gfx.sampler)
     gpu_draw_indexed(cmd, gfx.mesh.index_count)
 
-    // text
+    // ui
 
-    runs := make([]GfxFontRun, len(frame.texts), context.temp_allocator)
-    quad_capacity := 0
-    for text, index in frame.texts {
-        runs[index] = gfx_font_run(text.face, text.size_in_point, text.text)
-        quad_capacity += len(runs[index].glyphs)
+    rect_capacity := 0
+    for box in frame.ui {
+        rect_capacity += 5 + len(box.run.glyphs)
     }
-    quad_capacity += int(gfx_font_atlas_count())
     gfx_font_flush(cmd)
 
-    quads, quads_ptr := gpu_arena_push(gfx.gpu_arena, GfxTextQuad, i64(quad_capacity))
-    quad_count : i32 = 0
-    constants, constants_ptr := gpu_arena_push(gfx.gpu_arena, GfxTextConstants)
+    rects, rects_ptr := gpu_arena_push(gfx.gpu_arena, GfxRect, i64(rect_capacity))
+    rect_count : i32 = 0
+    constants, constants_ptr := gpu_arena_push(gfx.gpu_arena, GfxUiConstants)
     constants.screen_size = { f32(width), f32(height) }
 
     atlas_scale := 1.0 / f32(gfx_font_atlas_size)
-    for run, index in runs {
-        color := frame.texts[index].color
-        pen := [2]f32{ math.round(frame.texts[index].origin.x), frame.texts[index].origin.y }
-        for glyph in run.glyphs {
-            if glyph.subrect.max.x > glyph.subrect.min.x {
-                quads[quad_count] = {
-                    pos    = pen + glyph.bearing,
-                    size   = glyph.subrect.max - glyph.subrect.min,
-                    uv_min = glyph.subrect.min * atlas_scale,
-                    uv_max = glyph.subrect.max * atlas_scale,
-                    color  = color,
-                    page   = glyph.page,
-                }
-                quad_count += 1
+    for box in frame.ui {
+        if .Draw_Drop_Shadow in box.flags {
+            color := gfx_color_pack({ 0, 0, 0, 0.5 })
+            shadow := RectF32{ box.rect.min - 8 + 4, box.rect.max + 8 + 4 }
+            rects[rect_count] = { dst = shadow, clip = box.clip, colors = { color, color, color, color }, corner_radius = box.corner_radius + 8, edge_softness = 8 }
+            rect_count += 1
+        }
+        if .Draw_Background in box.flags {
+            color := gfx_color_pack(box.background_color)
+            rects[rect_count] = { dst = box.rect, clip = box.clip, colors = { color, color, color, color }, corner_radius = box.corner_radius }
+            rect_count += 1
+        }
+        if .Draw_Hot_Effects in box.flags && box.hot_t > 0.001 {
+            top := gfx_color_pack({ 1, 1, 1, 0.16 * box.hot_t })
+            bottom := gfx_color_pack({ 1, 1, 1, 0.04 * box.hot_t })
+            rects[rect_count] = { dst = box.rect, clip = box.clip, colors = { top, bottom, top, bottom }, corner_radius = box.corner_radius }
+            rect_count += 1
+        }
+        if .Draw_Active_Effects in box.flags && box.active_t > 0.001 {
+            top := gfx_color_pack({ 0, 0, 0, 0.4 * box.active_t })
+            bottom := gfx_color_pack({ 0, 0, 0, 0.15 * box.active_t })
+            rects[rect_count] = { dst = box.rect, clip = box.clip, colors = { top, bottom, top, bottom }, corner_radius = box.corner_radius }
+            rect_count += 1
+        }
+        if .Draw_Border in box.flags && box.border_thickness > 0 {
+            color := gfx_color_pack(box.border_color)
+            rects[rect_count] = { dst = box.rect, clip = box.clip, colors = { color, color, color, color }, corner_radius = box.corner_radius, border_thickness = box.border_thickness }
+            rect_count += 1
+        }
+        if .Draw_Text in box.flags {
+            metrics := gfx_font_metrics(box.font_face, box.font_size)
+            size := box.rect.max - box.rect.min
+            pen := [2]f32{
+                math.round(box.rect.min.x + (size.x - box.run.advance) * 0.5),
+                math.round(box.rect.min.y + (size.y + metrics.ascent - metrics.descent) * 0.5),
             }
-            pen.x += glyph.advance
+            color := gfx_color_pack(box.text_color)
+            for glyph in box.run.glyphs {
+                if glyph.subrect.max.x > glyph.subrect.min.x {
+                    position := pen + glyph.bearing
+                    rects[rect_count] = {
+                        dst     = { position, position + glyph.subrect.max - glyph.subrect.min },
+                        uv      = { glyph.subrect.min * atlas_scale, glyph.subrect.max * atlas_scale },
+                        clip    = box.clip,
+                        colors  = { color, color, color, color },
+                        texture = glyph.texture,
+                    }
+                    rect_count += 1
+                }
+                pen.x += glyph.advance
+            }
         }
-    }
-
-    for index in 0 ..< gfx_font_atlas_count() {
-        quads[quad_count] = {
-            pos    = { 0, f32(index * gfx_font_atlas_size) },
-            size   = { gfx_font_atlas_size, gfx_font_atlas_size },
-            uv_min = { 0, 0 },
-            uv_max = { 1, 1 },
-            color  = { 1, 1, 1, 1 },
-            page   = index,
-        }
-        quad_count += 1
     }
 
     gpu_set_render_target(cmd, back_buffer_view)
-    gpu_set_pipeline(cmd, gfx.text_pipeline)
+    gpu_set_pipeline(cmd, gfx.ui_pipeline)
 
     c_idx = 0
-    c_idx = gpu_push_constant(cmd, c_idx, quads_ptr)
+    c_idx = gpu_push_constant(cmd, c_idx, rects_ptr)
     c_idx = gpu_push_constant(cmd, c_idx, constants_ptr)
-    c_idx = gpu_push_constant(cmd, c_idx, gfx_font_atlas_view())
-    gpu_push_constant(cmd, c_idx, gfx.text_sampler)
-    gpu_draw(cmd, 6, quad_count)
+    gpu_push_constant(cmd, c_idx, gfx.ui_sampler)
+    gpu_draw(cmd, 4, rect_count)
 
     gpu_barrier(cmd, GpuTextureBarrier{ texture = back_buffer, before = {.Rtv}, after = {.Present} })
     gpu_command_list_end(cmd)
@@ -380,6 +400,10 @@ gfx_render :: proc(frame: ^FrameContext) {
 
     gpu_swapchain_present(frame.swapchain)
     gpu_collect()
+}
+
+gfx_color_pack :: proc(color: [4]f32) -> [4]u8 {
+    return { u8(color.r * 255 + 0.5), u8(color.g * 255 + 0.5), u8(color.b * 255 + 0.5), u8(color.a * 255 + 0.5) }
 }
 
 gfx_create_pipeline :: proc() -> GpuPipeline {
