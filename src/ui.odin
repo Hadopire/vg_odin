@@ -40,12 +40,13 @@ UiBoxFlag :: enum {
     Draw_Hot_Effects,
     Draw_Active_Effects,
 }
+UiBoxFlags :: bit_set[UiBoxFlag]
+
+inner_flags_mask :: UiBoxFlags{ .View_Scroll_X, .View_Scroll_Y, .View_Scroll_Percent }
 
 UiKey :: struct {
     value: u64
 }
-
-UiBoxFlags :: bit_set[UiBoxFlag]
 
 UiBox :: struct {
     first_child:  ^UiBox,
@@ -209,7 +210,7 @@ ui_signal :: proc(box: ^UiBox) -> UiSignal {
         }
 
         if (scrolls_x || scrolls_y) && event.kind == .Scroll && rect_contains(rect, position) {
-            speed : f32 = 0.25
+            speed : f32 = 0.75
             delta := [2]f32{ f32(event.delta_x) * speed, -f32(event.delta_y) * speed }
             if .Shift in event.modifiers {
                 delta = { delta.y, delta.x }
@@ -251,20 +252,20 @@ ui_spacer :: proc(size: UiSize) {
     box.pref_size[1 - layout_axis] = { kind = .Pixels, value = 0, strictness = 1 }
 }
 
-ui_row_begin :: proc(flags := UiBoxFlags{}, key := "") -> ^UiBox {
-    return ui_layout_box_begin(.X, flags, key)
+ui_row_begin :: proc(flags := UiBoxFlags{}, key := "", padding := UiSize{}) -> ^UiBox {
+    return ui_layout_box_begin(.X, flags, key, padding)
 }
 
 ui_row_end :: proc(loc := #caller_location) {
-    ui_pop_parent(loc)
+    ui_layout_box_end(loc)
 }
 
-ui_column_begin :: proc(flags := UiBoxFlags{}, key := "") -> ^UiBox {
-    return ui_layout_box_begin(.Y, flags, key)
+ui_column_begin :: proc(flags := UiBoxFlags{}, key := "", padding := UiSize{}) -> ^UiBox {
+    return ui_layout_box_begin(.Y, flags, key, padding)
 }
 
 ui_column_end :: proc(loc := #caller_location) {
-    ui_pop_parent(loc)
+    ui_layout_box_end(loc)
 }
 
 ui_label :: proc(text: string) {
@@ -649,11 +650,25 @@ ui_box_make_keyed :: proc(flags: UiBoxFlags, display_text: string, key: string) 
 }
 
 @(private="file")
-ui_layout_box_begin :: proc(axis: UiAxis, flags: UiBoxFlags, key: string) -> ^UiBox {
+ui_layout_box_begin :: proc(axis: UiAxis, flags: UiBoxFlags, key: string, padding: UiSize) -> ^UiBox {
     box := ui_box_make_keyed(flags, "", key)
     box.child_layout_axis = axis
     ui_push_parent(box)
+    ui_spacer(padding)
     return box
+}
+
+@(private="file")
+ui_layout_box_end :: proc(loc: runtime.Source_Code_Location) {
+    box := ui_stack_top(&ui_state.stacks.parent)
+    padding := box.first_child.pref_size[int(box.child_layout_axis)]
+    if padding.value == 0 {
+        dll_remove(&box.first_child, &box.last_child, box.first_child)
+        ui_state.box_count -= 1
+    } else {
+        ui_spacer(padding)
+    }
+    ui_pop_parent(loc)
 }
 
 @(private="file")
