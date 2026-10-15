@@ -1,6 +1,7 @@
 package vg
 
 import "base:runtime"
+import "core:fmt"
 import "core:hash"
 import "core:math"
 import "core:math/linalg"
@@ -42,8 +43,6 @@ UiBoxFlag :: enum {
 }
 UiBoxFlags :: bit_set[UiBoxFlag]
 
-inner_flags_mask :: UiBoxFlags{ .View_Scroll_X, .View_Scroll_Y, .View_Scroll_Percent }
-
 UiKey :: struct {
     value: u64
 }
@@ -55,6 +54,7 @@ UiBox :: struct {
     prev:         ^UiBox,
     parent:       ^UiBox,
 
+    // builder settings
     flags:             UiBoxFlags,
     text:              string,
     pref_size:         [2]UiSize,
@@ -68,6 +68,7 @@ UiBox :: struct {
     font_face:         GfxFontFace,
     font_size:         f32,
 
+    // layout data
     hash_key:     UiKey,
     run:          GfxFontRun,
     rel_position: [2]f32,
@@ -77,6 +78,7 @@ UiBox :: struct {
     hot_t:        f32,
     active_t:     f32,
 
+    // scroll
     view_off:        [2]f32,
     view_off_target: [2]f32,
     view_percent:    [2]f32,
@@ -85,6 +87,7 @@ UiBox :: struct {
 
 UiCacheNode :: struct {
     rect:               RectF32,
+    clip_rect:          RectF32,
     last_touched_index: i64,
     hot_t:              f32,
     active_t:           f32,
@@ -99,6 +102,7 @@ UiCache :: struct {
     hot_key:          UiKey,
     active_key:       UiKey,
     drag_start_mouse: [2]f32,
+    drag_data:        [64]byte,
 }
 
 UiSignalFlag :: enum {
@@ -116,8 +120,9 @@ UiSignalFlags :: bit_set[UiSignalFlag]
 UiSignal :: struct {
     box:        ^UiBox,
     flags:      UiSignalFlags,
-    mouse:      [2]f32,
+    cursor:     [2]f32,
     drag_delta: [2]f32,
+    clip_rect:  RectF32
 }
 
 ui_begin :: proc(frame: FrameContext, cache: ^UiCache) {
@@ -174,11 +179,11 @@ ui_box_make :: proc(flags := UiBoxFlags{}, text := "") -> ^UiBox {
 
 ui_signal :: proc(box: ^UiBox) -> UiSignal {
     cache := ui_state.cache
-    signal := UiSignal{ box = box, mouse = ui_state.cursor }
+    signal := UiSignal{ box = box, cursor = ui_state.cursor }
     if box.hash_key == ui_nil_key {
         return signal
     }
-    rect := cache.nodes[box.hash_key].rect
+    rect := cache.nodes[box.hash_key].clip_rect
     is_clickable := .Clickable in box.flags
     scrolls_x := .View_Scroll_X in box.flags
     scrolls_y := .View_Scroll_Y in box.flags
@@ -241,6 +246,7 @@ ui_signal :: proc(box: ^UiBox) -> UiSignal {
         cache.hot_key = box.hash_key
         signal.flags += {.Hovering}
     }
+    signal.clip_rect = rect
     return signal
 }
 
@@ -275,6 +281,95 @@ ui_label :: proc(text: string) {
 ui_button :: proc(text: string) -> UiSignal {
     box := ui_box_make({.Clickable, .Draw_Background, .Draw_Border, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, text)
     return ui_signal(box)
+}
+
+ui_line_height :: proc(box: ^UiBox = nil) -> f32 {
+    if box != nil {
+        return gfx_font_metrics(box.font_face, box.font_size).line_height
+    }
+    return gfx_font_metrics(ui_stack_top(&ui_state.stacks.font_face), ui_stack_top(&ui_state.stacks.font_size)).line_height
+}
+
+ui_cache_node :: proc(box: ^UiBox) -> UiCacheNode {
+    node: UiCacheNode
+    if box.hash_key != ui_nil_key {
+        node = ui_state.cache.nodes[box.hash_key]
+    }
+    return node
+}
+
+ui_drag_store :: proc(value: $T) where size_of(T) <= size_of(UiCache{}.drag_data) {
+    value := value
+    mem.copy(&ui_state.cache.drag_data, &value, size_of(T))
+}
+
+ui_drag_load :: proc($T: typeid) -> (value: T) where size_of(T) <= size_of(UiCache{}.drag_data) {
+    mem.copy(&value, &ui_state.cache.drag_data, size_of(T))
+    return value
+}
+
+ui_scroll_bar :: proc(box: ^UiBox) {
+    parent      := ui_stack_top(&ui_state.stacks.parent)
+    cross_index := int(parent.child_layout_axis)
+    axis_index  := 1 - cross_index
+    axis        := UiAxis(axis_index)
+    cross       := UiAxis(cross_index)
+
+    box_rect     := ui_cache_node(box).rect
+    view_size    := box_rect.max[axis_index] - box_rect.min[axis_index]
+    content_size := box.view_bounds[axis_index]
+    max_scroll   := max(content_size - view_size, 0)
+
+    show_scroll_bar := max_scroll > view_size
+    if show_scroll_bar {
+        padding_px :: 1
+        thumb_size_pct: f32 = max(view_size / content_size, 0.05)
+        thumb_pos_pct: f32 = box.view_off[axis_index] / max_scroll * (1 - thumb_size_pct)
+        key := fmt.tprintf("scroll_bar_%v_%v", box.hash_key.value, axis)
+
+        scroll_bar := ui_layout_box_begin(cross, {.Clickable, .Draw_Background}, key, padding = { kind = .Pixels, value = padding_px, strictness = 1 })
+            scroll_bar.pref_size[axis_index] = { kind = .Percent_Of_Parent, value = 1 }
+            scroll_bar.pref_size[cross_index] = { kind = .Children_Sum, strictness = 1 }
+            scroll_bar.corner_radius = 4
+            track := ui_layout_box_begin(axis, {}, "track", padding = { kind = .Pixels, value = padding_px, strictness = 1 })
+                track.pref_size[axis_index] = { kind = .Percent_Of_Parent, value = 1 }
+                track.pref_size[cross_index] = { kind = .Children_Sum, strictness = 1 }
+                ui_spacer({ kind = .Percent_Of_Parent, value = thumb_pos_pct })
+                thumb := ui_box_make_keyed({.Clickable, .Draw_Background, .Draw_Hot_Effects, .Draw_Active_Effects}, "", "thumb")
+                thumb.pref_size[axis_index] = { kind = .Percent_Of_Parent, value = thumb_size_pct }
+                thumb.pref_size[cross_index] = { kind = .Pixels, value = 4, strictness = 1 }
+                thumb.background_color = thumb.text_color
+                thumb.corner_radius = 2
+                ui_spacer({ kind = .Percent_Of_Parent, value = 1 - thumb_pos_pct - thumb_size_pct })
+            ui_layout_box_end()
+        ui_layout_box_end()
+
+        track_rect    := ui_cache_node(track).rect
+        track_size_px := track_rect.max[axis_index] - track_rect.min[axis_index] - padding_px * 2
+        thumb_size_px := track_size_px * thumb_size_pct
+        track_start   := track_rect.min[axis_index] + thumb_size_px * 0.5 + padding_px
+        track_length  := track_size_px - thumb_size_px
+
+        thumb_signal := ui_signal(thumb)
+        bar_signal   := ui_signal(scroll_bar)
+        if .Pressed in thumb_signal.flags {
+            // store the current offset as the initial offset when dragging the thumb
+            ui_drag_store(box.view_off_target[axis_index])
+        }
+        if .Pressed in bar_signal.flags {
+            // scroll to the click position and store that as the initial offset when dragging the track
+            offset := (bar_signal.cursor[axis_index] - track_start) / track_length * max_scroll
+            ui_drag_store(clamp(offset, 0, max_scroll))
+        }
+
+        #unroll for signal in ([2]UiSignal{ thumb_signal, bar_signal }) {
+            if .Dragging in signal.flags {
+                offset := clamp(ui_drag_load(f32) + signal.drag_delta[axis_index] / track_length * max_scroll, 0, max_scroll)
+                box.view_off[axis_index] = offset
+                box.view_off_target[axis_index] = offset
+            }
+        }
+    }
 }
 
 ui_push_parent :: proc(box: ^UiBox) {
@@ -539,7 +634,8 @@ ui_layout :: proc() -> (draw_list: []^UiBox) {
         is_cached := box.hash_key != ui_nil_key
         if is_cached {
             node := &ui_state.cache.nodes[box.hash_key]
-            node.rect =rect_intersect(box.rect, box.clip)
+            node.rect = box.rect
+            node.clip_rect = rect_intersect(box.rect, box.clip)
             is_hot: f32 = box.hash_key == ui_state.cache.hot_key ? 1 : 0
             is_active: f32 = box.hash_key == ui_state.cache.active_key ? 1 : 0
             node.hot_t = ui_ease(node.hot_t, is_hot, 20)
@@ -659,7 +755,7 @@ ui_layout_box_begin :: proc(axis: UiAxis, flags: UiBoxFlags, key: string, paddin
 }
 
 @(private="file")
-ui_layout_box_end :: proc(loc: runtime.Source_Code_Location) {
+ui_layout_box_end :: proc(loc := #caller_location) {
     box := ui_stack_top(&ui_state.stacks.parent)
     padding := box.first_child.pref_size[int(box.child_layout_axis)]
     if padding.value == 0 {

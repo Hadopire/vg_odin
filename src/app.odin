@@ -101,6 +101,36 @@ update :: proc(app: ^AppContext, frame: ^FrameContext) {
     ui_begin(frame^, &app.ui_cache)
     ui_push_font_face(app.face)
 
+    // fps counter
+
+    @(static) time: f32
+    @(static) frames: f32
+    @(static) fps: f32
+    time += frame.dt
+    frames += 1
+    if time >= 0.5 {
+        fps = frames / time
+        time = 0
+        frames = 0
+    }
+
+    ui_push_pref_width({ kind = .Percent_Of_Parent, value = 1 })
+    ui_push_pref_height({ kind = .Children_Sum, value = 1 })
+    ui_row_begin({ .Floating_X, .Floating_Y })
+        ui_spacer({ kind = .Percent_Of_Parent, value = 1 })
+        str := fmt.aprint(int(fps), " fps", allocator = context.temp_allocator)
+        ui_push_pref_height({ kind = .Text_Content, strictness = 1 })
+        ui_push_pref_width({ kind = .Text_Content, strictness = 1 })
+        ui_label(str)
+        ui_pop_pref_height()
+        ui_pop_pref_width()
+        ui_spacer({ kind = .Pixels, value = 15, strictness = 1 })
+    ui_row_end()
+    ui_pop_pref_height()
+    ui_pop_pref_width()
+
+    // demo
+
     ui_push_pref_width({ kind = .Percent_Of_Parent, value = 1, strictness = 1 })
     ui_push_pref_height({ kind = .Children_Sum, strictness = 1 })
     ui_row_begin({.Draw_Background}, "menu_bar")
@@ -125,29 +155,6 @@ update :: proc(app: ^AppContext, frame: ^FrameContext) {
     ui_row_end()
 
     ui_spacer({ kind = .Pixels, value = 24 })
-
-    ui_push_pref_width({ kind = .Children_Sum })
-    ui_push_pref_height({ kind = .Children_Sum, strictness = 0 })
-    ui_push_corner_radius(8)
-    ui_column_begin({.Draw_Drop_Shadow, .Draw_Background, .Draw_Border, .Clip})
-    ui_pop_corner_radius()
-    ui_pop_pref_height()
-    ui_pop_pref_width()
-
-    ui_push_text_padding(8)
-    ui_push_pref_width({ kind = .Text_Content, strictness = 1 })
-    ui_push_pref_height({ kind = .Text_Content, strictness = 1 })
-    for size_in_point in ([]f32{ 9, 11, 14, 20 }) {
-        ui_push_font_size(size_in_point)
-        ui_label(fmt.tprintf("A %vpt label in a Children_Sum panel", size_in_point))
-        ui_pop_font_size()
-    }
-    ui_pop_pref_height()
-    ui_pop_pref_width()
-    ui_pop_text_padding()
-    ui_column_end()
-
-    ui_spacer({ kind = .Pixels, value = 100, strictness = 0 })
 
     ui_push_pref_width({ kind = .Pixels, value = 500, strictness = 1 })
     ui_push_pref_height({ kind = .Pixels, value = 100, strictness = 1 })
@@ -239,7 +246,7 @@ update :: proc(app: ^AppContext, frame: ^FrameContext) {
     }
     ui_row_end()
 
-    long_text := ```
+    long_text :: ```
     Unique représentante du genre des Enhydres (Enhydra), cette grosse loutre (classée dans la sous-famille des Lutrinés), avec un poids allant de 14 à 45 kg, diffère de toutes les autres espèces par sa capacité à pouvoir vivre en permanence immergée dans l’eau, à l’instar d’autres mammifères marins comme les Pinnipèdes. Elle est souvent aperçue nageant sur le dos, les mères faisant reposer leurs petits sur leur ventre. Son apparence atypique lui donne une allure intermédiaire entre les mammifères terrestres et marins.
 
     Elle fréquente les environnements côtiers où elle plonge jusqu'au fond pour se nourrir principalement d'invertébrés marins (oursins, divers mollusques et crustacés) et de certains poissons. Ses habitudes alimentaires sont remarquables : l'utilisation de pierres pour détacher ses proies ou briser des coquilles en fait l'un des rares mammifères à utiliser des outils. Considérée comme une espèce clé de voûte, elle régule les populations d'oursins qui, autrement, dévasteraient les écosystèmes des forêts de varech[1].
@@ -579,42 +586,53 @@ update :: proc(app: ^AppContext, frame: ^FrameContext) {
     ```
 
     lines := strings.split(long_text, "\n", context.temp_allocator)
+    long_text_box: ^UiBox
 
-    ui_push_pref_width({ kind = .Children_Sum, strictness = 0 })
+    ui_push_pref_width({ kind = .Percent_Of_Parent, value = 1 })
     ui_push_pref_height({ kind = .Percent_Of_Parent, strictness = 0, value = 1 })
-    ui_row_begin({.Draw_Background, .Draw_Border, .View_Scroll_X, .View_Scroll_Y, .Clip}, "long_text")
-        ui_spacer({ kind = .Pixels, value = 15, strictness = 1 })
-        ui_column_begin(padding = { kind = .Pixels, value = 15, strictness = 1 })
-            long_text_box := ui_column_begin({.View_Scroll_Y, .Clip}, "long_text")
+    ui_column_begin({.Draw_Background, .Draw_Border, .View_Scroll_X, .View_Scroll_Y, .Clip}, padding = { kind = .Pixels, value = 1, strictness = 1 })
+        ui_row_begin()
+            ui_spacer({ kind = .Pixels, value = 15, strictness = 1 })
+            ui_column_begin(padding = { kind = .Pixels, value = 15, strictness = 1 })
+                long_text_box = ui_column_begin({.View_Scroll_Y, .Clip}, "long_text")
+                ui_column_end()
+            ui_column_end()
+            ui_spacer({ kind = .Pixels, value = 15, strictness = 1 })
+
+            ui_push_background_color({ 0.2, 0.2, 0.2, 1 })
+            ui_push_text_color({ 0.5, 0.4, 0.5, 1 })
+            ui_scroll_bar(long_text_box)
+            ui_pop_text_color()
+            ui_pop_background_color()
+            ui_spacer({ kind = .Pixels, value = 1, strictness = 1 })
+
+            ui_push_parent(long_text_box)
+                signal := ui_signal(long_text_box)
+                rect   := signal.clip_rect
+                offset := max(0, min(long_text_box.view_off[1], long_text_box.view_off_target[1]))
+                height := rect.max[1] - rect.min[1]
+                if height == 0 do height = frame.resolution[1]
+                height += abs(long_text_box.view_off_target[1] - long_text_box.view_off[1])
+                line_height := ui_line_height()
+                total_lines := f32(len(lines))
+                line_start := math.floor(offset / line_height)
+                line_count := min(total_lines - line_start, math.ceil(height / line_height))
+
+                ui_spacer({ kind = .Pixels, value = line_start * line_height, strictness = 1 })
                 ui_push_pref_width({ kind = .Text_Content, strictness = 1 })
                 ui_push_pref_height({ kind = .Text_Content, strictness = 1 })
-                for line in lines {
+                for line in lines[int(line_start):][:int(line_count)] {
                     ui_label(line)
                 }
                 ui_pop_pref_height()
                 ui_pop_pref_width()
-                ui_signal(long_text_box)
-            ui_column_end()
-        ui_column_end()
-        ui_spacer({ kind = .Pixels, value = 15, strictness = 1 })
-
-        // scrollbar
-        ui_push_pref_width({ kind = .Children_Sum, strictness = 1 })
-        ui_push_background_color({ 0.2, 0.2, 0.2, 1 })
-        ui_column_begin({ .Draw_Background }, padding = { kind = .Pixels, value = 1, strictness = 1})
-            ui_row_begin(padding = { kind = .Pixels, value = 2, strictness = 1 })
-                scroll_bar := ui_box_make({ .Draw_Background }, "scroll_bar")
-                scroll_bar.pref_size[0] = { kind = .Pixels, value = 4, strictness = 1 }
-                scroll_bar.corner_radius = 2
-                scroll_bar.background_color = { 0.7, 0.7, 0.7, 1 }
-            ui_row_end()
-        ui_column_end()
-        ui_pop_background_color()
-        ui_pop_pref_width()
-
-    ui_row_end()
+                ui_spacer({ kind = .Pixels, value = (total_lines - line_start - line_count) * line_height, strictness = 1 })
+            ui_pop_parent()
+        ui_row_end()
+    ui_column_end()
     ui_pop_pref_width()
     ui_pop_pref_height()
+
 
     ui_pop_font_face()
     ui_end()
