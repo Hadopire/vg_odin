@@ -320,7 +320,7 @@ ui_scroll_bar :: proc(box: ^UiBox) {
     content_size := box.view_bounds[axis_index]
     max_scroll   := max(content_size - view_size, 0)
 
-    show_scroll_bar := max_scroll > view_size
+    show_scroll_bar := max_scroll > 0
     if show_scroll_bar {
         padding_px :: 1
         thumb_size_pct: f32 = max(view_size / content_size, 0.05)
