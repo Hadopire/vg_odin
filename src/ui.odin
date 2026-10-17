@@ -47,6 +47,13 @@ UiKey :: struct {
     value: u64
 }
 
+UiScroll :: struct {
+    offset:       [2]f32,
+    target:       [2]f32,
+    percent:      [2]f32,
+    content_size: [2]f32,
+}
+
 UiBox :: struct {
     first_child:  ^UiBox,
     last_child:   ^UiBox,
@@ -78,11 +85,8 @@ UiBox :: struct {
     hot_t:        f32,
     active_t:     f32,
 
-    // scroll
-    view_off:        [2]f32,
-    view_off_target: [2]f32,
-    view_percent:    [2]f32,
-    view_bounds:     [2]f32,
+    // cached data from last frame
+    scroll: UiScroll,
 }
 
 UiCacheNode :: struct {
@@ -91,10 +95,7 @@ UiCacheNode :: struct {
     last_touched_index: i64,
     hot_t:              f32,
     active_t:           f32,
-    view_off:           [2]f32,
-    view_off_target:    [2]f32,
-    view_percent:       [2]f32,
-    view_bounds:        [2]f32,
+    scroll:             UiScroll,
 }
 
 UiCache :: struct {
@@ -125,10 +126,22 @@ UiSignal :: struct {
     clip_rect:  RectF32
 }
 
+UiWindowSignalFlag :: enum {
+    Close,
+    Raise,
+}
+
+UiWindowSignal :: bit_set[UiWindowSignalFlag]
+
+UiWindow :: struct {
+    rect: RectF32
+}
+
+
 ui_begin :: proc(frame: FrameContext, cache: ^UiCache) {
     root := new(UiBox, frame.allocator)
     root.flags = {.Clip}
-    root.pref_size = { { value = frame.resolution.x, strictness = 1 }, { value = frame.resolution.y, strictness = 1 } }
+    root.pref_size = { { kind = .Pixels, value = frame.resolution.x, strictness = 1 }, { kind = .Pixels, value = frame.resolution.y, strictness = 1 } }
     root.child_layout_axis = .Y
 
     ui_state = {
@@ -226,7 +239,7 @@ ui_signal :: proc(box: ^UiBox) -> UiSignal {
             if !scrolls_y {
                 delta = { delta.x + delta.y, 0 }
             }
-            box.view_off_target += delta
+            box.scroll.target += delta
             signal.flags += {.Scrolled}
             event.consumed = true
         }
@@ -317,14 +330,14 @@ ui_scroll_bar :: proc(box: ^UiBox) {
 
     box_rect     := ui_cache_node(box).rect
     view_size    := box_rect.max[axis_index] - box_rect.min[axis_index]
-    content_size := box.view_bounds[axis_index]
+    content_size := box.scroll.content_size[axis_index]
     max_scroll   := max(content_size - view_size, 0)
 
     show_scroll_bar := max_scroll > 0
     if show_scroll_bar {
         padding_px :: 1
         thumb_size_pct: f32 = max(view_size / content_size, 0.05)
-        thumb_pos_pct: f32 = box.view_off[axis_index] / max_scroll * (1 - thumb_size_pct)
+        thumb_pos_pct: f32 = box.scroll.offset[axis_index] / max_scroll * (1 - thumb_size_pct)
         key := fmt.tprintf("scroll_bar_%v_%v", box.hash_key.value, axis)
 
         scroll_bar := ui_layout_box_begin(cross, {.Clickable, .Draw_Background}, key, padding = { kind = .Pixels, value = padding_px, strictness = 1 })
@@ -354,7 +367,7 @@ ui_scroll_bar :: proc(box: ^UiBox) {
         bar_signal   := ui_signal(scroll_bar)
         if .Pressed in thumb_signal.flags {
             // store the current offset as the initial offset when dragging the thumb
-            ui_drag_store(box.view_off_target[axis_index])
+            ui_drag_store(box.scroll.target[axis_index])
         }
         if .Pressed in bar_signal.flags {
             // scroll to the click position and store that as the initial offset when dragging the track
@@ -365,11 +378,141 @@ ui_scroll_bar :: proc(box: ^UiBox) {
         #unroll for signal in ([2]UiSignal{ thumb_signal, bar_signal }) {
             if .Dragging in signal.flags {
                 offset := clamp(ui_drag_load(f32) + signal.drag_delta[axis_index] / track_length * max_scroll, 0, max_scroll)
-                box.view_off[axis_index] = offset
-                box.view_off_target[axis_index] = offset
+                box.scroll.offset[axis_index] = offset
+                box.scroll.target[axis_index] = offset
             }
         }
     }
+}
+
+ui_window_begin :: proc(text: string, window: ^UiWindow) -> UiWindowSignal {
+    outer_px  :: 2
+    corner_px :: 16
+    flags       := UiBoxFlags{.Draw_Background, .Clip}
+    border_px   := ui_stack_top(&ui_state.stacks.border_thickness)
+    handle_px   := border_px + outer_px * 2
+    min_size_px := [2]f32{ 50, ui_line_height() }
+    if border_px > 0 {
+        flags += {.Draw_Border}
+    }
+    window.rect.max = linalg.max(window.rect.max, window.rect.min + min_size_px)
+
+    ui_push_pref_width({ kind = .Percent_Of_Parent, value = 1 })
+    ui_push_pref_height({ kind = .Percent_Of_Parent, value = 1 })
+    defer ui_pop_pref_height()
+    defer ui_pop_pref_width()
+    win_box := ui_box_make({.Clickable, .Floating_X, .Floating_Y}, text)
+    ui_push_parent(win_box)
+
+    // the window should be raised to the front when clicked
+    result: UiWindowSignal
+    win_rect := ui_cache_node(win_box).clip_rect
+    for event := ui_state.events.first; event != nil; event = event.next {
+        position := [2]f32{ f32(event.pos_x), f32(event.pos_y) }
+        if event.kind == .Press && event.key == .Mouse_Left && !event.consumed && rect_contains(win_rect, position) {
+            result += {.Raise}
+        }
+    }
+
+    // resize handles
+    handles: [4]^UiBox
+    ui_row_begin({.Floating_X, .Floating_Y})
+        handles[0] = ui_box_make_keyed({.Clickable}, "", "handle_left")
+        ui_column_begin()
+            handles[3] = ui_box_make_keyed({.Clickable}, "", "handle_top")
+            ui_spacer({ kind = .Percent_Of_Parent, value = 1 })
+            handles[1] = ui_box_make_keyed({.Clickable}, "", "handle_bot")
+        ui_column_end()
+        handles[2] = ui_box_make_keyed({.Clickable}, "", "handle_right")
+    ui_row_end()
+
+    for handle in handles {
+        axis_index := int(handle.parent.child_layout_axis)
+        handle.pref_size[axis_index] = { kind = .Pixels, value = handle_px, strictness = 1 }
+        handle.pref_size[1 - axis_index] = { kind = .Percent_Of_Parent, value = 1 }
+    }
+
+    // content
+    content: ^UiBox
+    title:   ^UiBox
+    ui_row_begin(padding = { kind = .Pixels, value = outer_px, strictness = 1 })
+        ui_column_begin(padding = { kind = .Pixels, value = outer_px, strictness = 1 })
+            ui_row_begin(flags, padding = { kind = .Pixels, value = border_px, strictness = 1 })
+                ui_column_begin(padding = { kind = .Pixels, value = border_px, strictness = 1 })
+                    title = ui_row_begin({.Clickable}, "title_bar")
+                        title.pref_size[1] = { kind = .Children_Sum, strictness = 1 }
+                        ui_push_pref_height({ kind = .Text_Content, strictness = 1 })
+                        ui_push_pref_width({ kind = .Text_Content, strictness = 1 })
+                        ui_label(win_box.text)
+                        ui_spacer({ kind = .Percent_Of_Parent, value = 1 })
+                        if .Clicked in ui_button("X").flags {
+                            result += {.Close}
+                        }
+                        ui_pop_pref_height()
+                        ui_pop_pref_width()
+                    ui_row_end()
+                    content = ui_box_make({.Clip})
+                    content.child_layout_axis = .Y
+                ui_column_end()
+            ui_row_end()
+        ui_column_end()
+    ui_row_end()
+
+    // drag
+    signals: [5]UiSignal
+    for handle, index in handles {
+        signals[index] = ui_signal(handle)
+        if .Pressed in signals[index].flags {
+            cursor := signals[index].cursor
+            drag := UiWindowDrag{ rect = window.rect }
+            if cursor.x < window.rect.min.x + corner_px do drag.mask.min.x = 1
+            if cursor.y < window.rect.min.y + corner_px do drag.mask.min.y = 1
+            if cursor.x > window.rect.max.x - corner_px do drag.mask.max.x = 1
+            if cursor.y > window.rect.max.y - corner_px do drag.mask.max.y = 1
+            ui_drag_store(drag)
+        }
+    }
+
+    signals[4] = ui_signal(title)
+    if .Pressed in signals[4].flags {
+        drag := UiWindowDrag{ rect = window.rect }
+        drag.mask.min = {1, 1}
+        drag.mask.max = {1, 1}
+        ui_drag_store(drag)
+    }
+
+    for signal in signals {
+        if .Dragging in signal.flags {
+            drag := ui_drag_load(UiWindowDrag)
+            rect := RectF32{
+                min = drag.rect.min + signal.drag_delta * drag.mask.min,
+                max = drag.rect.max + signal.drag_delta * drag.mask.max,
+            }
+            #unroll for axis in 0 ..< 2 {
+                if drag.mask.min[axis] > drag.mask.max[axis] {
+                    rect.min[axis] = min(rect.min[axis], rect.max[axis] - min_size_px[axis])
+                } else if drag.mask.min[axis] < drag.mask.max[axis] {
+                    rect.max[axis] = max(rect.max[axis], rect.min[axis] + min_size_px[axis])
+                }
+            }
+            window.rect = rect
+        }
+    }
+
+    size_px := window.rect.max - window.rect.min + outer_px * 2
+    win_box.rel_position = window.rect.min - outer_px
+    win_box.pref_size[0] = { kind = .Pixels, value = size_px.x, strictness = 1 }
+    win_box.pref_size[1] = { kind = .Pixels, value = size_px.y, strictness = 1 }
+
+    ui_push_parent(content)
+    return result
+}
+
+ui_window_end :: proc() {
+    ui_pop_parent()
+    win_box := ui_stack_top(&ui_state.stacks.parent)
+    ui_signal(win_box) // eat inputs over this window
+    ui_pop_parent()
 }
 
 ui_push_parent :: proc(box: ^UiBox) {
@@ -493,41 +636,44 @@ ui_layout :: proc() -> (draw_list: []^UiBox) {
 
     // size
     for axis in 0 ..< 2 {
-        floating_flag := UiBoxFlag(int(UiBoxFlag.Floating_X) + axis)
+        floating_flag := ui_floating_flag(axis)
 
-        // downwards pass
-        for box in boxes {
-            size := box.pref_size[axis]
-            #partial switch size.kind {
-            case .Pixels:
-                box.fixed_size[axis] = size.value
-            case .Text_Content:
-                content := axis == 0 ? box.run.advance + box.text_padding * 2 : gfx_font_metrics(box.font_face, box.font_size).line_height
-                box.fixed_size[axis] = content + size.value
-            case .Percent_Of_Parent:
-                ancestor := box.parent
-                for ancestor.pref_size[axis].kind == .Children_Sum {
-                    ancestor = ancestor.parent
+        // two passes, so that floating childen with Percent_Of_Parent sizes can be resolved with Children_Sum parent
+        for _ in 0 ..< 2 {
+            // downwards pass
+            for box in boxes {
+                size := box.pref_size[axis]
+                #partial switch size.kind {
+                case .Pixels:
+                    box.fixed_size[axis] = size.value
+                case .Text_Content:
+                    content := axis == 0 ? box.run.advance + box.text_padding * 2 : gfx_font_metrics(box.font_face, box.font_size).line_height
+                    box.fixed_size[axis] = content + size.value
+                case .Percent_Of_Parent:
+                    ancestor := box.parent
+                    for (ancestor.pref_size[axis].kind == .Children_Sum && floating_flag not_in box.flags) {
+                        ancestor = ancestor.parent
+                    }
+                    box.fixed_size[axis] = ancestor.fixed_size[axis] * size.value
                 }
-                box.fixed_size[axis] = ancestor.fixed_size[axis] * size.value
             }
-        }
 
-        // upwards pass
-        #reverse for box in boxes {
-            if box.pref_size[axis].kind == .Children_Sum {
-                sum: f32
-                for child := box.first_child; child != nil; child = child.next {
-                    if floating_flag in child.flags {
-                        continue
+            // upwards pass
+            #reverse for box in boxes {
+                if box.pref_size[axis].kind == .Children_Sum {
+                    sum: f32
+                    for child := box.first_child; child != nil; child = child.next {
+                        if floating_flag in child.flags {
+                            continue
+                        }
+                        if int(box.child_layout_axis) == axis {
+                            sum += child.fixed_size[axis]
+                        } else {
+                            sum = max(sum, child.fixed_size[axis])
+                        }
                     }
-                    if int(box.child_layout_axis) == axis {
-                        sum += child.fixed_size[axis]
-                    } else {
-                        sum = max(sum, child.fixed_size[axis])
-                    }
+                    box.fixed_size[axis] = sum
                 }
-                box.fixed_size[axis] = sum
             }
         }
 
@@ -560,7 +706,7 @@ ui_layout :: proc() -> (draw_list: []^UiBox) {
                         children_sum -= removeable * rm_pct
                     }
                 }
-                box.view_bounds[axis] = children_sum
+                box.scroll.content_size[axis] = children_sum
 
             } else {
                 // solve constraint along the *non*-layout axis
@@ -576,7 +722,7 @@ ui_layout :: proc() -> (draw_list: []^UiBox) {
                     }
                     children_max = max(children_max, child.fixed_size[axis])
                 }
-                box.view_bounds[axis] = children_max
+                box.scroll.content_size[axis] = children_max
             }
         }
     }
@@ -587,24 +733,22 @@ ui_layout :: proc() -> (draw_list: []^UiBox) {
             continue
         }
         node := &ui_state.cache.nodes[box.hash_key]
+        scroll := &box.scroll
         for axis in 0 ..< 2 {
-            max_scroll := max(box.view_bounds[axis] - box.fixed_size[axis], 0)
+            max_scroll := max(scroll.content_size[axis] - box.fixed_size[axis], 0)
 
-            target_untouched := box.view_off_target[axis] == node.view_off_target[axis]
+            target_untouched := scroll.target[axis] == node.scroll.target[axis]
             if .View_Scroll_Percent in box.flags && target_untouched {
-                target := box.view_percent[axis] * max_scroll
-                box.view_off[axis] += target - box.view_off_target[axis]
-                box.view_off_target[axis] = target
+                target := scroll.percent[axis] * max_scroll
+                scroll.offset[axis] += target - scroll.target[axis]
+                scroll.target[axis] = target
             }
-            box.view_off_target[axis] = clamp(box.view_off_target[axis], 0, max_scroll)
-            box.view_off[axis] = ui_ease(box.view_off[axis], box.view_off_target[axis], 15)
-            box.view_off[axis] = clamp(box.view_off[axis], 0, max_scroll)
-            box.view_percent[axis] = max_scroll > 0 ? box.view_off_target[axis] / max_scroll : 0
+            scroll.target[axis] = clamp(scroll.target[axis], 0, max_scroll)
+            scroll.offset[axis] = ui_ease(scroll.offset[axis], scroll.target[axis], 15)
+            scroll.offset[axis] = clamp(scroll.offset[axis], 0, max_scroll)
+            scroll.percent[axis] = max_scroll > 0 ? scroll.target[axis] / max_scroll : 0
         }
-        node.view_off = box.view_off
-        node.view_off_target = box.view_off_target
-        node.view_percent = box.view_percent
-        node.view_bounds = box.view_bounds
+        node.scroll = box.scroll
     }
 
     // position
@@ -616,14 +760,14 @@ ui_layout :: proc() -> (draw_list: []^UiBox) {
         children_clip := .Clip in box.flags ? rect_intersect(box.clip, box.rect) : box.clip
         offset: f32
         for child := box.first_child; child != nil; child = child.next {
-            if UiBoxFlag(int(UiBoxFlag.Floating_X) + layout_axis) not_in child.flags {
+            if ui_floating_flag(layout_axis) not_in child.flags {
                 child.rel_position[layout_axis] = offset
                 offset += child.fixed_size[layout_axis]
             }
-            if UiBoxFlag(int(UiBoxFlag.Floating_X) + cross_axis) not_in child.flags {
+            if ui_floating_flag(cross_axis) not_in child.flags {
                 child.rel_position[cross_axis] = 0
             }
-            child.rect.min = linalg.floor(box.rect.min + child.rel_position - box.view_off)
+            child.rect.min = linalg.floor(box.rect.min + child.rel_position - box.scroll.offset)
             child.rect.max = linalg.floor(child.rect.min + child.fixed_size)
             child.clip = children_clip
         }
@@ -693,6 +837,12 @@ UiState :: struct {
 ui_state: UiState
 
 @(private="file")
+UiWindowDrag :: struct {
+    rect: RectF32,
+    mask: RectF32,
+}
+
+@(private="file")
 ui_box_make_keyed :: proc(flags: UiBoxFlags, display_text: string, key: string) -> ^UiBox {
     parent := ui_stack_top(&ui_state.stacks.parent)
 
@@ -736,10 +886,7 @@ ui_box_make_keyed :: proc(flags: UiBoxFlags, display_text: string, key: string) 
     box.corner_radius = ui_stack_top(&ui_state.stacks.corner_radius)
     box.border_thickness = ui_stack_top(&ui_state.stacks.border_thickness)
     box.text_padding = ui_stack_top(&ui_state.stacks.text_padding)
-    box.view_off = cached.view_off
-    box.view_off_target = cached.view_off_target
-    box.view_percent = cached.view_percent
-    box.view_bounds = cached.view_bounds
+    box.scroll = cached.scroll
 
     ui_state.box_count += 1
     return box
@@ -765,6 +912,11 @@ ui_layout_box_end :: proc(loc := #caller_location) {
         ui_spacer(padding)
     }
     ui_pop_parent(loc)
+}
+
+@(private="file")
+ui_floating_flag :: proc(axis: int) -> UiBoxFlag {
+    return UiBoxFlag(int(UiBoxFlag.Floating_X) + axis)
 }
 
 @(private="file")

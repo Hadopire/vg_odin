@@ -25,6 +25,18 @@ FrameContext :: struct {
     window:          WindowHandle,
 }
 
+UiWindowNode :: struct {
+    next: ^UiWindowNode,
+    prev: ^UiWindowNode,
+    window: UiWindow,
+    idx: int
+}
+
+UiWindowList :: struct {
+    first: ^UiWindowNode,
+    last: ^UiWindowNode,
+}
+
 AppContext :: struct {
     render_counter:  ^JobCounter,
     face:            GfxFontFace,
@@ -32,6 +44,8 @@ AppContext :: struct {
     cursor:          [2]f32,
     async_rendering: bool,
     done:            bool,
+
+    test_windows: UiWindowList
 }
 
 @(private="file")
@@ -101,6 +115,21 @@ update :: proc(app: ^AppContext, frame: ^FrameContext) {
     ui_begin(frame^, &app.ui_cache)
     ui_push_font_face(app.face)
 
+    for node := app.test_windows.first; node != nil; {
+        signal := ui_window_begin(fmt.tprintf("test_window##%v", node.idx), &node.window)
+        ui_window_end()
+
+        next := node.next
+        if .Close in signal {
+            dll_remove(&app.test_windows.first, &app.test_windows.last, node)
+            free(node)
+        } else if .Raise in signal {
+            dll_remove(&app.test_windows.first, &app.test_windows.last, node)
+            dll_push_front(&app.test_windows.first, &app.test_windows.last, node)
+        }
+        node = next
+    }
+
     // fps counter
 
     @(static) time: f32
@@ -145,6 +174,14 @@ update :: proc(app: ^AppContext, frame: ^FrameContext) {
     for name in ([]string{ "File", "Edit", "View", "Window", "Help" }) {
         if .Clicked in ui_button(name).flags {
             fmt.println("clicked", name)
+            if name == "Window" {
+                node := new(UiWindowNode)
+                node.window.rect.max = { 400, 300 }
+                @(static) idx := 0
+                node.idx = idx
+                idx += 1
+                dll_push_front(&app.test_windows.first, &app.test_windows.last, node)
+            }
         }
     }
     ui_pop_pref_height()
@@ -609,14 +646,14 @@ update :: proc(app: ^AppContext, frame: ^FrameContext) {
             ui_push_parent(long_text_box)
                 signal := ui_signal(long_text_box)
                 rect   := signal.clip_rect
-                offset := max(0, min(long_text_box.view_off[1], long_text_box.view_off_target[1]))
+                offset := max(0, min(long_text_box.scroll.offset[1], long_text_box.scroll.target[1]))
                 height := rect.max[1] - rect.min[1]
                 if height == 0 do height = frame.resolution[1]
-                height += abs(long_text_box.view_off_target[1] - long_text_box.view_off[1])
+                height += abs(long_text_box.scroll.target[1] - long_text_box.scroll.offset[1])
                 line_height := ui_line_height()
                 total_lines := f32(len(lines))
                 line_start := math.floor(offset / line_height)
-                line_count := min(total_lines - line_start, math.ceil(height / line_height))
+                line_count := min(total_lines - line_start, math.ceil(height / line_height) + 1)
 
                 ui_spacer({ kind = .Pixels, value = line_start * line_height, strictness = 1 })
                 ui_push_pref_width({ kind = .Text_Content, strictness = 1 })
