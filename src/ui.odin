@@ -102,7 +102,7 @@ UiCache :: struct {
     nodes:            map[UiKey]UiCacheNode,
     hot_key:          UiKey,
     active_key:       UiKey,
-    drag_start_mouse: [2]f32,
+    drag_start:       [2]f32,
     drag_data:        [64]byte,
 }
 
@@ -211,7 +211,7 @@ ui_signal :: proc(box: ^UiBox) -> UiSignal {
         if is_clickable && is_left_mouse && event.kind == .Press && rect_contains(rect, position) {
             cache.hot_key = box.hash_key
             cache.active_key = box.hash_key
-            cache.drag_start_mouse = position
+            cache.drag_start = position
             signal.flags += {.Pressed}
             event.consumed = true
         }
@@ -251,7 +251,7 @@ ui_signal :: proc(box: ^UiBox) -> UiSignal {
     }
     if cache.active_key == box.hash_key {
         signal.flags += {.Dragging}
-        signal.drag_delta = ui_state.cursor - cache.drag_start_mouse
+        signal.drag_delta = ui_state.cursor - cache.drag_start
     }
     nobody_hot := cache.hot_key == ui_nil_key || cache.hot_key == box.hash_key
     nobody_active := cache.active_key == ui_nil_key || cache.active_key == box.hash_key
