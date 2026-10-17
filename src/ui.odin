@@ -767,8 +767,9 @@ ui_layout :: proc() -> (draw_list: []^UiBox) {
             if ui_floating_flag(cross_axis) not_in child.flags {
                 child.rel_position[cross_axis] = 0
             }
-            child.rect.min = linalg.floor(box.rect.min + child.rel_position - box.scroll.offset)
-            child.rect.max = linalg.floor(child.rect.min + child.fixed_size)
+            position := box.rect.min + child.rel_position - box.scroll.offset
+            child.rect.min = linalg.floor(position)
+            child.rect.max = linalg.floor(position + child.fixed_size)
             child.clip = children_clip
         }
     }
