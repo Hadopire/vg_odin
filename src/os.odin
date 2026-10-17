@@ -36,6 +36,7 @@ OsEvent :: struct {
     delta_x:   i32,
     delta_y:   i32,
     character: rune,
+    repeat:    bool,
     consumed:  bool,
 }
 

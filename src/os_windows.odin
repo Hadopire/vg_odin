@@ -126,6 +126,7 @@ Win32Window :: struct {
     hwnd:           win32.HWND,
     minimized:      bool,
     high_surrogate: rune,
+    keys_down:      bit_set[OsKey],
 }
 
 @(private="file")
@@ -248,7 +249,13 @@ win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPAR
             key := win_key_to_os_key(raw.data.keyboard)
             if key != .None {
                 kind: OsEventKind = .Release if int(raw.data.keyboard.Flags) & win32.RI_KEY_BREAK != 0 else .Press
-                push_key_event(kind, WindowHandle(window), key)
+                event := push_key_event(kind, WindowHandle(window), key)
+                if kind == .Press {
+                    event.repeat = key in window.keys_down
+                    window.keys_down += {key}
+                } else {
+                    window.keys_down -= {key}
+                }
             }
         }
 
@@ -363,6 +370,10 @@ win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPAR
 
         result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)
         //fiber.switch_to(from_fiber)
+
+    case win32.WM_KILLFOCUS:
+        window.keys_down = {}
+        result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     case:
         result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)
