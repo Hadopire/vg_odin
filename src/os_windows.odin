@@ -4,6 +4,7 @@ package vg
 import "base:runtime"
 import win32 "core:sys/windows"
 import "core:mem"
+import "core:unicode/utf16"
 import "core:unicode/utf8"
 import "fiber"
 
@@ -122,8 +123,9 @@ min_client_height :: 96
 
 @(private="file")
 Win32Window :: struct {
-    hwnd:       win32.HWND,
-    minimized:  bool,
+    hwnd:           win32.HWND,
+    minimized:      bool,
+    high_surrogate: rune,
 }
 
 @(private="file")
@@ -213,7 +215,23 @@ win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPAR
 
     case win32.WM_TIMER:
         fiber.switch_to(from_fiber)
-        result = 0
+
+    case win32.WM_CHAR:
+        character := rune(wparam)
+        if character >= 0xd800 && character < 0xdc00 {
+            window.high_surrogate = character
+        } else {
+            if utf16.is_surrogate(character) {
+                character = utf16.decode_surrogate_pair(window.high_surrogate, character)
+            }
+            if character == '\r' {
+                character = '\n'
+            }
+            if (character >= 32 && character != 127) || character == '\n' {
+                event := push_event(.Text, WindowHandle(window))
+                event.character = character
+            }
+        }
 
     case win32.WM_INPUTLANGCHANGE:
         update_key_names()

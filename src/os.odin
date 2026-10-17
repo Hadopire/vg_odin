@@ -12,6 +12,7 @@ OsEventKind :: enum {
     Release,
     Mouse_Move,
     Scroll,
+    Text,
 }
 
 OsModifier :: enum {
@@ -34,6 +35,7 @@ OsEvent :: struct {
     pos_y:     i32,
     delta_x:   i32,
     delta_y:   i32,
+    character: rune,
     consumed:  bool,
 }
 
