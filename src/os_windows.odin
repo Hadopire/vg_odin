@@ -60,7 +60,7 @@ main :: proc() {
 
     window := new(Win32Window)
     defer free(window)
-    window.hwnd = win32.CreateWindowExW(0, class_name, win32.L("vg_odin"), win32.WS_OVERLAPPEDWINDOW, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, nil, nil, instance, window)
+    window.hwnd = win32.CreateWindowExW(win32.WS_EX_NOREDIRECTIONBITMAP, class_name, win32.L("vg_odin"), win32.WS_OVERLAPPEDWINDOW, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, nil, nil, instance, window)
     hwnd := window.hwnd
 
     raw_devices := [2]win32.RAWINPUTDEVICE{
@@ -197,12 +197,11 @@ win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPAR
         push_event(.Window_Close, WindowHandle(window))
         win32.PostQuitMessage(0)
 
-    case win32.WM_PAINT:
-        ps: win32.PAINTSTRUCT
-        win32.BeginPaint(hwnd, &ps)
-        fiber.switch_to(from_fiber)
-        win32.EndPaint(hwnd, &ps)
-        win32.DwmFlush()
+    //case win32.WM_PAINT:
+    //    ps: win32.PAINTSTRUCT
+    //    win32.BeginPaint(hwnd, &ps)
+    //    fiber.switch_to(from_fiber)
+    //    win32.EndPaint(hwnd, &ps)
 
     case win32.WM_SIZE:
         if wparam == win32.SIZE_MINIMIZED {
@@ -369,7 +368,8 @@ win_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPAR
         //}
 
         result = win32.DefWindowProcW(hwnd, msg, wparam, lparam)
-        //fiber.switch_to(from_fiber)
+        fiber.switch_to(from_fiber)
+        win32.DwmFlush()
 
     case win32.WM_KILLFOCUS:
         window.keys_down = {}
