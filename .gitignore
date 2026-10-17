@@ -12,4 +12,5 @@ ols.json
 
 !vendor/slang/*.exe
 !vendor/slang/*.dll
+!vendor/d3d12/*
 !.gitignore
