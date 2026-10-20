@@ -35,6 +35,7 @@ GfxFontRun :: struct {
 }
 
 gfx_font_atlas_size :: 1024
+gfx_font_atlas_count :: 4
 
 gfx_font_init :: proc() {
     if err := virtual.arena_init_growing(&gfx_font.arena); err != nil {
@@ -46,6 +47,25 @@ gfx_font_init :: proc() {
     gfx_font.allocator = virtual.arena_allocator(&gfx_font.arena)
     gfx_font.cache_allocator = virtual.arena_allocator(&gfx_font.cache_arena)
     gfx_font.styles = make(map[GfxFontStyleKey]^GfxFontStyle, gfx_font.allocator)
+    for &atlas in gfx_font.atlases {
+        atlas.texture = gpu_create_texture({
+            width         = gfx_font_atlas_size,
+            height        = gfx_font_atlas_size,
+            format        = .R8_Unorm,
+            usage         = {.Srv_Pixel, .Copy_Dest},
+            initial_usage = {.Srv_Pixel},
+        })
+        atlas.view = gpu_create_texture_view(atlas.texture, { kind = .Srv })
+        atlas.buffer = gpu_create_buffer({
+            size   = gfx_font_atlas_size * gfx_font_atlas_size,
+            usage  = {.Copy_Source},
+            memory = .Upload,
+        })
+        atlas.pixels = gpu_map(atlas.buffer)
+        mem.zero_slice(atlas.pixels)
+        atlas.nodes = make([]rect_pack.Node, gfx_font_atlas_size, gfx_font.allocator)
+        atlas.dirty = { max = { gfx_font_atlas_size, gfx_font_atlas_size } }
+    }
     gfx_font_atlas_push()
 
     font.init()
@@ -58,11 +78,9 @@ gfx_font_shutdown :: proc() {
     font.shutdown()
 
     for &atlas in gfx_font.atlases {
-        if atlas.buffer != nil {
-            gpu_destroy_buffer(atlas.buffer)
-            gpu_destroy_view(atlas.view)
-            gpu_destroy_texture(atlas.texture)
-        }
+        gpu_destroy_buffer(atlas.buffer)
+        gpu_destroy_view(atlas.view)
+        gpu_destroy_texture(atlas.texture)
     }
     virtual.arena_destroy(&gfx_font.cache_arena)
     virtual.arena_destroy(&gfx_font.arena)
@@ -183,28 +201,11 @@ gfx_font_run :: proc(face: GfxFontFace, size_in_point: f32, str: string, allocat
     return run
 }
 
-gfx_font_flush :: proc(cmd: GpuCommandList) {
-    dirty: [gfx_font_atlas_count]^GfxFontAtlas
-    copy:  [gfx_font_atlas_count]GpuTextureBarrier
-    read:  [gfx_font_atlas_count]GpuTextureBarrier
-    dirty_count := 0
-    for &atlas in gfx_font.atlases {
-        size := atlas.dirty.max - atlas.dirty.min
-        if size.x > 0 && size.y > 0 {
-            dirty[dirty_count] = &atlas
-            copy[dirty_count] = { texture = atlas.texture, before = {.Srv_Pixel}, after = {.Copy_Dest} }
-            read[dirty_count] = { texture = atlas.texture, before = {.Copy_Dest}, after = {.Srv_Pixel} }
-            dirty_count += 1
-        }
-    }
-
-    gpu_barrier(cmd, copy[:dirty_count])
-    for atlas in dirty[:dirty_count] {
-        size := atlas.dirty.max - atlas.dirty.min
-        gpu_copy_buffer_to_texture(cmd, atlas.texture, 0, 0, atlas.dirty.min.x, atlas.dirty.min.y, size.x, size.y, atlas.buffer, 0, gfx_font_atlas_size)
+gfx_font_end_frame :: proc() -> (dirty: [gfx_font_atlas_count]RectI32) {
+    for &atlas, page in gfx_font.atlases {
+        dirty[page] = atlas.dirty
         atlas.dirty = {}
     }
-    gpu_barrier(cmd, read[:dirty_count])
 
     if gfx_font.atlas_full {
         free_all(gfx_font.cache_allocator)
@@ -213,12 +214,38 @@ gfx_font_flush :: proc(cmd: GpuCommandList) {
         gfx_font.atlas_full = false
         gfx_font_atlas_push()
     }
+
+    return
+}
+
+gfx_font_flush :: proc(cmd: GpuCommandList, dirty: [gfx_font_atlas_count]RectI32) {
+    pages: [gfx_font_atlas_count]int
+    copy:  [gfx_font_atlas_count]GpuTextureBarrier
+    read:  [gfx_font_atlas_count]GpuTextureBarrier
+    page_count := 0
+    for rect, page in dirty {
+        size := rect.max - rect.min
+        if size.x > 0 && size.y > 0 {
+            texture := gfx_font.atlases[page].texture
+            pages[page_count] = page
+            copy[page_count] = { texture = texture, before = {.Srv_Pixel}, after = {.Copy_Dest} }
+            read[page_count] = { texture = texture, before = {.Copy_Dest}, after = {.Srv_Pixel} }
+            page_count += 1
+        }
+    }
+
+    gpu_barrier(cmd, copy[:page_count])
+    for page in pages[:page_count] {
+        atlas := &gfx_font.atlases[page]
+        rect := dirty[page]
+        size := rect.max - rect.min
+        gpu_copy_buffer_to_texture(cmd, atlas.texture, 0, 0, rect.min.x, rect.min.y, size.x, size.y, atlas.buffer, 0, gfx_font_atlas_size)
+    }
+    gpu_barrier(cmd, read[:page_count])
 }
 
 @(private="file")
 gfx_font: GfxFont
-@(private="file")
-gfx_font_atlas_count :: 4
 
 @(private="file")
 GfxFontFaceNode :: struct {
@@ -288,25 +315,6 @@ gfx_font_size_in_pixel :: proc(size_in_point: f32) -> i32 {
 @(private="file")
 gfx_font_atlas_push :: proc() {
     atlas := &gfx_font.atlases[gfx_font.atlas_count]
-    if atlas.buffer == nil {
-        atlas.texture = gpu_create_texture({
-            width         = gfx_font_atlas_size,
-            height        = gfx_font_atlas_size,
-            format        = .R8_Unorm,
-            usage         = {.Srv_Pixel, .Copy_Dest},
-            initial_usage = {.Srv_Pixel},
-        })
-        atlas.view = gpu_create_texture_view(atlas.texture, { kind = .Srv })
-        atlas.buffer = gpu_create_buffer({
-            size   = gfx_font_atlas_size * gfx_font_atlas_size,
-            usage  = {.Copy_Source},
-            memory = .Upload,
-        })
-        atlas.pixels = gpu_map(atlas.buffer)
-        mem.zero_slice(atlas.pixels)
-        atlas.nodes = make([]rect_pack.Node, gfx_font_atlas_size, gfx_font.allocator)
-        atlas.dirty = { max = { gfx_font_atlas_size, gfx_font_atlas_size } }
-    }
     rect_pack.init_target(&atlas.pack, gfx_font_atlas_size, gfx_font_atlas_size, raw_data(atlas.nodes), i32(len(atlas.nodes)))
     gfx_font.atlas_count += 1
 }

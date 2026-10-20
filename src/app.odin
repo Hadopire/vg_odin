@@ -21,6 +21,7 @@ FrameContext :: struct {
     cube_transform:  matrix[4, 4]f32,
     cube_color:      [4]f32,
     ui:              []^UiBox,
+    font_dirty:      [gfx_font_atlas_count]RectI32,
     os_events:       OsEventList,
     window:          WindowHandle,
 }
@@ -734,12 +735,14 @@ entry :: proc(window: WindowHandle) {
         update(&app, frame)
         if app.done do break
 
+        frame.ui = ui_layout()
+
         if app.render_counter != nil {
             wait_and_release_counter(app.render_counter)
             app.render_counter = nil
         }
 
-        frame.ui = ui_layout()
+        frame.font_dirty = gfx_font_end_frame()
 
         if app.async_rendering {
             app.render_counter = job_schedule(.High, render_job, frame)

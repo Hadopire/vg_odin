@@ -319,7 +319,7 @@ gfx_render :: proc(frame: ^FrameContext) {
     for box in frame.ui {
         rect_capacity += 5 + len(box.run.glyphs)
     }
-    gfx_font_flush(cmd)
+    gfx_font_flush(cmd, frame.font_dirty)
 
     rects, rects_ptr := gpu_arena_push(gfx.gpu_arena, GfxRect, i64(rect_capacity))
     rect_count : i32 = 0
